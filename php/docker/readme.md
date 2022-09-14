@@ -1,0 +1,3 @@
+# Production ready docker container for PHP (Laravel)
+Most of the time you can get by with just using something like `php:8.1-apache-bullseye` as your base and reconfiguring the ports to work in OpenShift. However, sometimes you need some extra performance and your application might not be runnable inside something like Swoole or RoadRunner.
+Copy the contents of this folder into your application and build your image.
