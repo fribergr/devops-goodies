@@ -1,0 +1,146 @@
+# Avoid detached pipelines
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+stages:
+  - test
+  - analysis
+  - build
+  - docker
+
+variables:
+  # Point BUILD_IMAGE to a reasonable image containing your build tools
+  BUILD_IMAGE: registry.local/php-images:8.1-build
+  # Set for performance
+  GIT_DEPTH: 10
+
+.not-scheduled:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - when: on_success
+
+cache: &global_cache
+  paths:
+    - node_modules/
+    - vendor/
+  policy: pull-push
+
+PHP:
+  image: $BUILD_IMAGE
+  stage: test
+  coverage: '/^\s*Lines:\s*\d+.\d+\%/'
+  extends:
+    - .not-scheduled
+  script:
+    - time npm install --prefer-offline --no-audit --progress=false
+    - time npm run production
+    - time composer install --prefer-dist --no-progress
+    - time php artisan test --parallel --coverage-text --log-junit junit-report.xml --coverage-cobertura cobertura-report.xml
+  artifacts:
+    when: on_success
+    expire_in: 1month
+    paths:
+      - build
+    reports:
+      junit: junit-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: cobertura-report.xml
+
+security-check:
+  stage: analysis
+  image: $BUILD_IMAGE
+  needs: []
+  cache: []
+  allow_failure: true
+  script:
+    - local-php-security-checker
+
+phpstan:
+  stage: analysis
+  image: $BUILD_IMAGE
+  needs: ["PHP"]
+  extends: .not-scheduled
+  allow_failure: true
+  cache:
+    <<: *global_cache
+    policy: pull
+  script:
+    - ./vendor/bin/phpstan analyse --memory-limit=2G
+
+package:
+  image: $BUILD_IMAGE
+  stage: build
+  needs: ["PHP"]
+  cache:
+    <<: *global_cache
+    policy: pull
+  extends:
+    - .not-scheduled
+  script:
+    - time npm install --prefer-offline --no-audit --progress=false
+    - time npm run production
+    - time composer install --prefer-dist --no-progress --no-dev --optimize-autoloader
+    - time zip -qr application.zip ./ -x .\* -x build/\* -x depcheck-data/\* -x node_modules/\* -x bootstrap/cache/packages.php -x bootstrap/cache/services.php
+  artifacts:
+    when: on_success
+    expire_in: 1month
+    paths:
+      - application.zip
+
+bundle:
+  image: docker:edge
+  stage: docker
+  extends: .not-scheduled
+  cache: []
+  services:
+    - docker:edge-dind
+  needs:
+    - package
+  script:
+    - mkdir build && mv application.zip build/ && cd build/ && unzip application.zip && rm application.zip
+    - echo $CI_JOB_TOKEN | docker login -u gitlab-ci-token --password-stdin $CI_REGISTRY
+    - docker build -f 8.1.dockerfile -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+
+
+deploy-test:
+    stage: deploy
+    image: docker:git
+    rules:
+        - if: '$CI_PIPELINE_SOURCE == "schedule"'
+          when: never
+        - when: manual
+          allow_failure: true
+    services:
+        - docker:edge-dind
+    needs:
+        - bundle
+    script:
+        - echo "Doing things to deploy to test environment, could be envoy, could be gitops via argocd, could be ansible, etc."
+    environment:
+        name: test
+        deployment_tier: testing
+        url: https://testing.local
+
+deploy-prod:
+    stage: deploy
+    image: docker:git
+    rules:
+        - if: '$CI_PIPELINE_SOURCE == "schedule"'
+          when: never
+        - when: manual
+          allow_failure: true
+    services:
+        - docker:edge-dind
+    needs:
+        - bundle
+    script:
+        - echo "Doing things to deploy to prod environment, could be envoy, could be gitops via argocd, could be ansible, etc."
+    environment:
+        name: production
+        deployment_tier: production
+        url: https://production.local
