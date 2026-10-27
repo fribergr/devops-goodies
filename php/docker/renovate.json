@@ -1,0 +1,14 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": [
+        "config:recommended"
+    ],
+    "packageRules": [
+        {
+            "description": "runtime-images tags are <php version>-<pipeline iid>, so read the iid as the patch version",
+            "matchDatasources": ["docker"],
+            "matchPackageNames": ["registry.local/runtime-images/php"],
+            "versioning": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)-(?<patch>\\d+)$"
+        }
+    ]
+}

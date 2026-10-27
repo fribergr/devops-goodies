@@ -7,12 +7,12 @@ workflow:
 stages:
   - test
   - analysis
-  - build
   - docker
+  - deploy
 
 variables:
   # Point BUILD_IMAGE to a reasonable image containing your build tools
-  BUILD_IMAGE: registry.local/php-images:8.1-build
+  BUILD_IMAGE: registry.local/build-images/php-8.5-build
   # Set for performance
   GIT_DEPTH: 10
 
@@ -35,8 +35,8 @@ PHP:
   extends:
     - .not-scheduled
   script:
-    - time npm install --prefer-offline --no-audit --progress=false
-    - time npm run production
+    - time npm ci --prefer-offline --no-audit --progress=false
+    - time npm run build
     - time composer install --prefer-dist --no-progress
     - time php artisan test --parallel --coverage-text --log-junit junit-report.xml --coverage-cobertura cobertura-report.xml
   artifacts:
@@ -57,7 +57,7 @@ security-check:
   cache: []
   allow_failure: true
   script:
-    - local-php-security-checker
+    - COMPOSER_AUDIT_ABANDONED=ignore composer audit
 
 phpstan:
   stage: analysis
@@ -71,52 +71,33 @@ phpstan:
   script:
     - ./vendor/bin/phpstan analyse --memory-limit=2G
 
-package:
-  image: $BUILD_IMAGE
-  stage: build
-  needs: ["PHP"]
-  cache:
-    <<: *global_cache
-    policy: pull
-  extends:
-    - .not-scheduled
-  script:
-    - time npm install --prefer-offline --no-audit --progress=false
-    - time npm run production
-    - time composer install --prefer-dist --no-progress --no-dev --optimize-autoloader
-    - time zip -qr application.zip ./ -x .\* -x build/\* -x depcheck-data/\* -x node_modules/\* -x bootstrap/cache/packages.php -x bootstrap/cache/services.php
-  artifacts:
-    when: on_success
-    expire_in: 1month
-    paths:
-      - application.zip
-
 bundle:
-  image: docker:edge
+  image: docker:29.9-cli
   stage: docker
   extends: .not-scheduled
   cache: []
   services:
-    - docker:edge-dind
+    - docker:29.9-dind
+  # The Dockerfile installs dependencies and builds the frontend itself.
   needs:
-    - package
+    - job: PHP
+      artifacts: false
   script:
-    - mkdir build && mv application.zip build/ && cd build/ && unzip application.zip && rm application.zip
     - echo $CI_JOB_TOKEN | docker login -u gitlab-ci-token --password-stdin $CI_REGISTRY
-    - docker build -f 8.1.dockerfile -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
+    # Without --provenance=false the image becomes a manifest list with an attestation, which
+    # the registry rejects with "blob unknown" for the image manifest.
+    - docker build --provenance=false -f Dockerfile -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
     - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
 
 
 deploy-test:
     stage: deploy
-    image: docker:git
+    image: docker:29.9-cli
     rules:
         - if: '$CI_PIPELINE_SOURCE == "schedule"'
           when: never
         - when: manual
           allow_failure: true
-    services:
-        - docker:edge-dind
     needs:
         - bundle
     script:
@@ -128,14 +109,12 @@ deploy-test:
 
 deploy-prod:
     stage: deploy
-    image: docker:git
+    image: docker:29.9-cli
     rules:
         - if: '$CI_PIPELINE_SOURCE == "schedule"'
           when: never
         - when: manual
           allow_failure: true
-    services:
-        - docker:edge-dind
     needs:
         - bundle
     script:

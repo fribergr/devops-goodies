@@ -1,0 +1,36 @@
+stages:
+  - build
+
+.build_image:
+  stage: build
+  image: docker:29.9-cli
+  services:
+    - docker:29.9-dind
+  variables:
+    # Unique, immutable tag per pipeline (e.g. php:8.5-142). Downstream images should pin this one.
+    IMAGE_TAG: $CI_REGISTRY_IMAGE/php:$PHP_VERSION-$CI_PIPELINE_IID
+    # Floating tag that always points to the newest build of this PHP version.
+    IMAGE_TAG_FLOATING: $CI_REGISTRY_IMAGE/php:$PHP_VERSION
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    # Always pull the base image and skip the layer cache so rebuilds pick up security fixes.
+    # Without --provenance=false the image becomes a manifest list with an attestation, which
+    # the registry rejects with "blob unknown" for the image manifest.
+    - docker build --pull --no-cache --provenance=false
+        --label org.opencontainers.image.revision=$CI_COMMIT_SHA
+        --label org.opencontainers.image.source=$CI_PROJECT_URL
+        -t $IMAGE_TAG -t $IMAGE_TAG_FLOATING .
+    - docker push $IMAGE_TAG
+    - docker push $IMAGE_TAG_FLOATING
+
+build_php_8_5:
+  extends: .build_image
+  variables:
+    PHP_VERSION: "8.5"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
+      changes:
+        - Dockerfile
+        - .gitlab-ci.yml

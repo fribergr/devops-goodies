@@ -1,7 +1,7 @@
 # Deploying a PHP application
-If you are using Kubernetes, take a look at [ArgoCD](https://argo-cd.readthedocs.io/en/stable/) and our [kubernetes](../../kubernetes/readme.md) readme.
+If you are using Kubernetes, take a look at [ArgoCD](https://argo-cd.readthedocs.io/en/stable/) and our [kubernetes](../../kubernetes/readme.md) readme. On Kubernetes, migrations belong in an init container rather than in the deploy.
 
-If you are deploying to static VMs or physical machines, I'd suggest using [Envoy](https://laravel.com/docs/9.x/envoy#main-content) from [Laravel](https://laravel.com/).
+If you are deploying to static VMs or physical machines, I'd suggest using [Envoy](https://laravel.com/docs/envoy) from [Laravel](https://laravel.com/).
 
 ## Envoy
 Envoy is a cli tool that executes commands on remote servers over ssh.
@@ -18,7 +18,7 @@ An example of this file could look like:
         'server.local' => '/var/www/myapp',
     ];
     $phpservices = [
-        'server.local' => 'php8.1-fpm',
+        'server.local' => 'php8.5-fpm',
     ];
     $workers = [
         'server.local' => 'queue-worker:queue-worker_00',
@@ -37,7 +37,7 @@ An example of this file could look like:
     clone_repository
     run_composer
     npm_install
-    npm_run_prod
+    npm_run_build
     update_symlinks
     run_migration
     update_current_release
@@ -62,14 +62,13 @@ An example of this file could look like:
 @task('npm_install')
     echo "NPM install"
     cd {{ $new_release_dir }}
-    npm install --silent --no-progress
+    npm ci --silent --no-progress
 @endtask
 
-@task('npm_run_prod')
-    echo "NPM run prod"
+@task('npm_run_build')
+    echo "NPM run build"
     cd {{ $new_release_dir }}
-    npm run prod --silent --no-progress
-    npm run clean
+    npm run build --silent
 @endtask
 
 @task('update_symlinks')
@@ -96,7 +95,7 @@ An example of this file could look like:
     echo 'Reloading php-fpm'
     sudo systemctl reload {{ $app_service }}
     echo 'Restarting worker (if needed)'
-    [ "x{{ $worker }}" != "x" ] && sudo supervisorctl restart {{ $worker }}
+    if [ -n "{{ $worker }}" ]; then sudo supervisorctl restart {{ $worker }}; fi
 @endtask
 
 ```
@@ -108,7 +107,7 @@ To get this to work, a few things need to exist before running the actual deploy
 
 When the above is setup, you can run a command like:
 ```bash
-~/.composer/vendor/bin/envoy run deploy --server=server.local --commit="$CI_COMMIT_SHA"
+~/.config/composer/vendor/bin/envoy run deploy --server=server.local --commit="$CI_COMMIT_SHA"
 ```
 
 This includes `$CI_COMMIT_SHA` which is a gitlab-ci predefined variable that points to the specific commit hash you wish to deploy.
