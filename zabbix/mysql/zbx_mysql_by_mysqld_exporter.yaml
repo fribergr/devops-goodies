@@ -1,0 +1,1411 @@
+zabbix_export:
+  version: '7.4'
+  template_groups:
+    - uuid: c28931f80bf1459883da30e82ed630a5
+      name: Templates/Databases
+  templates:
+    - uuid: 751fdf5f84634b14a2736f2689adba95
+      template: MySQL by mysqld_exporter
+      name: MySQL by mysqld_exporter
+      description: |-
+        Scrapes mysqld_exporter over HTTP from a Zabbix proxy inside the cluster. No Zabbix agent or ODBC needed.
+
+        Per host: set {$MYSQL.EXPORTER.SVC} to <service>.<namespace>.svc.cluster.local:9104 and monitor the host by the cluster's proxy.
+        Database sizes need the exporter flag --collect.info_schema.tables; without it, Database discovery stays empty.
+      vendor:
+        name: HIT
+        version: 7.4-2
+      groups:
+        - name: Templates/Databases
+      items:
+        - uuid: 5ba0373a5da84c01bd6be5e8c4df78d8
+          name: 'MySQL: exporter raw'
+          type: HTTP_AGENT
+          key: mysql.exporter.raw
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          description: Raw Prometheus text from mysqld_exporter. Every other item is a dependent item of this one.
+          url: http://{$MYSQL.EXPORTER.SVC}/metrics
+          timeout: '{$MYSQL.EXPORTER.TIMEOUT}'
+          headers:
+            - name: User-Agent
+              value: Zabbix
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 7157158b0e1e44bcb404ad9c74f149fb
+          name: 'MySQL: Up'
+          type: DEPENDENT
+          key: mysql.up
+          delay: '0'
+          description: 1 when the exporter could connect to MySQL on this scrape, otherwise 0.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_up
+                - value
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: availability
+          triggers:
+            - uuid: d04ac410b9754c4abd670632fe93cfc9
+              expression: last(/MySQL by mysqld_exporter/mysql.up)=0
+              name: 'MySQL: the exporter cannot connect to MySQL'
+              priority: HIGH
+              description: 'The exporter answers but its connection to MySQL fails: MySQL is down or restarting, every connection is taken (max_connections, see "refused connections"), or the exporter''s user or password has changed.'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: 0190b2bb19fd4a31b52e3f8bebd0a6a1
+              expression: nodata(/MySQL by mysqld_exporter/mysql.up,{$MYSQL.NODATA})=1
+              name: 'MySQL: no data from mysqld_exporter for {$MYSQL.NODATA}'
+              priority: AVERAGE
+              description: 'The proxy cannot fetch the exporter''s /metrics. The exporter runs as a sidecar in the MySQL pod, so the usual cause is the pod itself being down. Otherwise: the Service or port in {$MYSQL.EXPORTER.SVC} is wrong, or a NetworkPolicy blocks the Zabbix namespace.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 8e56ed8533d04fc685e30494dce76597
+          name: 'MySQL: Uptime'
+          type: DEPENDENT
+          key: mysql.uptime
+          delay: '0'
+          units: uptime
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_uptime
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: availability
+          triggers:
+            - uuid: 43f87f630e674f9fa4221bfcd22c82dd
+              expression: last(/MySQL by mysqld_exporter/mysql.uptime)<{$MYSQL.RESTART.WINDOW}
+              name: 'MySQL: restarted (uptime {ITEM.LASTVALUE1})'
+              priority: WARNING
+              description: 'MySQL has been running for less than {$MYSQL.RESTART.WINDOW} seconds. An OOMKill of the pod shows up here: check the pod''s restart count and last state. A restart by hand does too. Resolves by itself.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 05f6fefb70ef41228cdfbd0ab783b5bc
+          name: 'MySQL: Version'
+          type: DEPENDENT
+          key: mysql.version
+          delay: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_version_info
+                - label
+                - version
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: build
+        - uuid: 4eab4c74470f40368dd5d28ef81a99a2
+          name: 'MySQL: Exporter version'
+          type: DEPENDENT
+          key: mysql.exporter.version
+          delay: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysqld_exporter_build_info
+                - label
+                - version
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: build
+        - uuid: b8324acd70014bd487bf9577d6e516e6
+          name: 'MySQL: Failing exporter collectors'
+          type: DEPENDENT
+          key: mysql.exporter.collectors_failed
+          delay: '0'
+          description: 'Collectors whose query failed on the latest scrape. The usual cause is a missing grant: the exporter''s user needs PROCESS, REPLICATION CLIENT and SELECT.'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_exporter_collector_success == 0
+                - function
+                - count
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: exporter
+          triggers:
+            - uuid: 63b137d225744abeb8437ec7110bffed
+              expression: min(/MySQL by mysqld_exporter/mysql.exporter.collectors_failed,10m)>0
+              name: 'MySQL: {ITEM.LASTVALUE1} exporter collectors are failing'
+              priority: WARNING
+              description: Some metrics are missing. Run curl against the exporter and look at mysql_exporter_collector_success, then at the exporter's log.
+              tags:
+                - tag: scope
+                  value: exporter
+        - uuid: 8d88a9b5e03948cb9781589b8eb9acc5
+          name: 'MySQL: Connections'
+          type: DEPENDENT
+          key: mysql.threads_connected
+          delay: '0'
+          value_type: UNSIGNED
+          description: Open client connections (Threads_connected).
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_threads_connected
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: connections
+        - uuid: d332a0fe6d3e41b4a32187640059d5dd
+          name: 'MySQL: Running threads'
+          type: DEPENDENT
+          key: mysql.threads_running
+          delay: '0'
+          value_type: UNSIGNED
+          description: Connections executing a statement right now. Stays in single digits on a healthy server; a pile-up means queries are waiting on locks or I/O.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_threads_running
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: connections
+        - uuid: 598a2efeabba4d6ab02f22bc9601e1f4
+          name: 'MySQL: Max used connections'
+          type: DEPENDENT
+          key: mysql.max_used_connections
+          delay: '0'
+          value_type: UNSIGNED
+          description: The peak since MySQL started.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_max_used_connections
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: connections
+        - uuid: 1160f65ed67b4228803f70a46d493ca3
+          name: 'MySQL: max_connections'
+          type: DEPENDENT
+          key: mysql.max_connections
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_variables_max_connections
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: connections
+        - uuid: 419a870e9f6547688064db0525459774
+          name: 'MySQL: Connection usage'
+          type: CALCULATED
+          key: mysql.connections.util
+          value_type: FLOAT
+          params: 100*last(//mysql.threads_connected)/last(//mysql.max_connections)
+          units: '%'
+          description: Connections as a share of max_connections.
+          tags:
+            - tag: component
+              value: connections
+          triggers:
+            - uuid: e639b7f2127a41b49dd3c2786343c999
+              expression: min(/MySQL by mysqld_exporter/mysql.connections.util,5m)>{$MYSQL.CONN.UTIL.WARN}
+              name: 'MySQL: more than {$MYSQL.CONN.UTIL.WARN}% of max_connections in use for 5m'
+              priority: WARNING
+              description: Close to the limit where MySQL refuses new connections and the installations get "Too many connections". Every web pod, worker and per-minute schedule pod holds its own connection.
+              tags:
+                - tag: scope
+                  value: connections
+        - uuid: deec47f413fb46f7a77e205c4cfe4a97
+          name: 'MySQL: Refused connections (max_connections)'
+          type: DEPENDENT
+          key: mysql.connections.refused
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          description: Connections MySQL turned away because max_connections was reached.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_connection_errors_total{error="max_connections"}
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: connections
+          triggers:
+            - uuid: a7c8005c2ed2427bb43765818f869944
+              expression: max(/MySQL by mysqld_exporter/mysql.connections.refused,5m)>0
+              name: 'MySQL: refusing connections, max_connections reached'
+              priority: AVERAGE
+              description: Requests and jobs in the installations are failing with "Too many connections". Find what holds the connections (SHOW PROCESSLIST), or raise max_connections.
+              tags:
+                - tag: scope
+                  value: connections
+        - uuid: 4ab70c2cbc13430b9cb4cf3b771de89d
+          name: 'MySQL: Aborted connects'
+          type: DEPENDENT
+          key: mysql.aborted_connects
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          description: 'Failed connection attempts: wrong password, unknown database, or a client giving up during the handshake.'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_aborted_connects
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: connections
+        - uuid: 811e15d6526b4a7fb97553fe37c2922f
+          name: 'MySQL: Queries'
+          type: DEPENDENT
+          key: mysql.questions
+          delay: '0'
+          value_type: FLOAT
+          units: qps
+          description: Statements sent by clients (Questions).
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_questions
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: queries
+        - uuid: 0f341fd4df7848808f15b23c9f766480
+          name: 'MySQL: SELECT statements'
+          type: DEPENDENT
+          key: mysql.com.select
+          delay: '0'
+          value_type: FLOAT
+          units: qps
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_commands_total{command="select"}
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: queries
+        - uuid: 55b896c948b24f84b13113dbac7259f4
+          name: 'MySQL: INSERT statements'
+          type: DEPENDENT
+          key: mysql.com.insert
+          delay: '0'
+          value_type: FLOAT
+          units: qps
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_commands_total{command="insert"}
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: queries
+        - uuid: eb357a361368480489a7dd9f7a6494c8
+          name: 'MySQL: UPDATE statements'
+          type: DEPENDENT
+          key: mysql.com.update
+          delay: '0'
+          value_type: FLOAT
+          units: qps
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_commands_total{command="update"}
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: queries
+        - uuid: 17a96c74a346439d9e93357717345464
+          name: 'MySQL: DELETE statements'
+          type: DEPENDENT
+          key: mysql.com.delete
+          delay: '0'
+          value_type: FLOAT
+          units: qps
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_commands_total{command="delete"}
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: queries
+        - uuid: 8b64605181544c1c8d8bf9985147c108
+          name: 'MySQL: Slow queries'
+          type: DEPENDENT
+          key: mysql.slow_queries
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          description: Queries that took longer than long_query_time. Counted whether or not the slow query log is on.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_slow_queries
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: queries
+          triggers:
+            - uuid: d66f2fac2b5b443995b6404a8cfd386a
+              expression: min(/MySQL by mysqld_exporter/mysql.slow_queries,5m)>{$MYSQL.SLOW_QUERIES.MAX}
+              name: 'MySQL: more than {$MYSQL.SLOW_QUERIES.MAX} slow queries per second for 5m'
+              priority: WARNING
+              description: Find them with the slow query log (slow_query_log=ON) or SHOW PROCESSLIST while it is happening.
+              tags:
+                - tag: scope
+                  value: queries
+        - uuid: 89bb2e604f934a43aedbf2e733e29649
+          name: 'MySQL: long_query_time'
+          type: DEPENDENT
+          key: mysql.long_query_time
+          delay: '0'
+          units: s
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_variables_long_query_time
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: queries
+        - uuid: f28ab3d0a7a44ee2979c60ad65c0cd92
+          name: 'MySQL: Bytes received'
+          type: DEPENDENT
+          key: mysql.bytes_received
+          delay: '0'
+          value_type: FLOAT
+          units: Bps
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_bytes_received
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: traffic
+        - uuid: d4782040cfc34e2e94239231ba8fdf33
+          name: 'MySQL: Bytes sent'
+          type: DEPENDENT
+          key: mysql.bytes_sent
+          delay: '0'
+          value_type: FLOAT
+          units: Bps
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_bytes_sent
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: traffic
+        - uuid: 433fbf0d1e984b5e9398ea79f5d266ff
+          name: 'MySQL: Temporary tables'
+          type: DEPENDENT
+          key: mysql.created_tmp_tables
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_created_tmp_tables
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: queries
+        - uuid: 91c26672183144c7a43256e089fa65b1
+          name: 'MySQL: Temporary tables on disk'
+          type: DEPENDENT
+          key: mysql.created_tmp_disk_tables
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          description: Internal temporary tables that did not fit in memory (tmp_table_size) and went to disk.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_created_tmp_disk_tables
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: queries
+        - uuid: e7cab8aace76466fa921e61569e2de12
+          name: 'MySQL: InnoDB buffer pool size'
+          type: DEPENDENT
+          key: mysql.innodb.buffer_pool_size
+          delay: '0'
+          units: B
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_variables_innodb_buffer_pool_size
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: 16b5a5cf49014d89af4cd4fa8d232c71
+          name: 'MySQL: InnoDB buffer pool data'
+          type: DEPENDENT
+          key: mysql.innodb.buffer_pool_data
+          delay: '0'
+          value_type: FLOAT
+          units: B
+          description: Bytes of the buffer pool holding data pages.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_innodb_buffer_pool_bytes_data
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: 1007239dbe62463aa1d95e89db522894
+          name: 'MySQL: InnoDB buffer pool dirty'
+          type: DEPENDENT
+          key: mysql.innodb.buffer_pool_dirty
+          delay: '0'
+          value_type: FLOAT
+          units: B
+          description: Changed pages not yet flushed to disk.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_innodb_buffer_pool_bytes_dirty
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: 01eed7aa6891473da73ae61ebc0f15fa
+          name: 'MySQL: InnoDB buffer pool read requests'
+          type: DEPENDENT
+          key: mysql.innodb.read_requests
+          delay: '0'
+          value_type: FLOAT
+          units: rps
+          description: Logical page reads.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_innodb_buffer_pool_read_requests
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: 85f79635f28d4c96ae0cce7fee5cc176
+          name: 'MySQL: InnoDB buffer pool disk reads'
+          type: DEPENDENT
+          key: mysql.innodb.reads
+          delay: '0'
+          value_type: FLOAT
+          units: rps
+          description: Page reads the buffer pool could not serve, so InnoDB read them from disk.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_innodb_buffer_pool_reads
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: 824452344f2c4ed39d683f046eac7b4e
+          name: 'MySQL: InnoDB buffer pool hit ratio'
+          type: CALCULATED
+          key: mysql.innodb.hit_ratio
+          value_type: FLOAT
+          params: 100-100*last(//mysql.innodb.reads)/max(last(//mysql.innodb.read_requests),1)
+          units: '%'
+          description: Share of page reads served from memory.
+          tags:
+            - tag: component
+              value: innodb
+          triggers:
+            - uuid: 0cbd758edc744320a18a3d014878afff
+              expression: max(/MySQL by mysqld_exporter/mysql.innodb.hit_ratio,15m)<{$MYSQL.BUFFER_POOL.HIT.MIN}
+              name: 'MySQL: InnoDB buffer pool hit ratio below {$MYSQL.BUFFER_POOL.HIT.MIN}% for 15m'
+              priority: WARNING
+              description: The working set of all tenant databases no longer fits in innodb_buffer_pool_size, so queries wait on disk. Raise the buffer pool, and the pod's memory limit with it. A freshly started server reads everything from disk, so this stays quiet while the restart trigger is active.
+              dependencies:
+                - name: 'MySQL: restarted (uptime {ITEM.LASTVALUE1})'
+                  expression: last(/MySQL by mysqld_exporter/mysql.uptime)<{$MYSQL.RESTART.WINDOW}
+              tags:
+                - tag: scope
+                  value: innodb
+        - uuid: 035d705f14484ed0bbc76346078c9085
+          name: 'MySQL: InnoDB waits for a free page'
+          type: DEPENDENT
+          key: mysql.innodb.wait_free
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          description: Reads that had to wait for InnoDB to flush a page before a buffer pool page was free. Above 0 means the buffer pool is too small or flushing cannot keep up.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_innodb_buffer_pool_wait_free
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: b83a55645b6e4056a4db5250fc706fdf
+          name: 'MySQL: InnoDB data read'
+          type: DEPENDENT
+          key: mysql.innodb.data_read
+          delay: '0'
+          value_type: FLOAT
+          units: Bps
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_innodb_data_read
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: 050e34c771e6460b82116661f6aa5c58
+          name: 'MySQL: InnoDB data written'
+          type: DEPENDENT
+          key: mysql.innodb.data_written
+          delay: '0'
+          value_type: FLOAT
+          units: Bps
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_innodb_data_written
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: e31af9b3ca3044d08ed9242dde60511d
+          name: 'MySQL: InnoDB row lock waits'
+          type: DEPENDENT
+          key: mysql.innodb.row_lock_waits
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_innodb_row_lock_waits
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: ca088a825b874309b64c44838df2816f
+          name: 'MySQL: InnoDB row locks waiting now'
+          type: DEPENDENT
+          key: mysql.innodb.row_lock_current_waits
+          delay: '0'
+          value_type: UNSIGNED
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_innodb_row_lock_current_waits
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: b0494b939466437788a4e1fd0f3a8ae0
+          name: 'MySQL: InnoDB log waits'
+          type: DEPENDENT
+          key: mysql.innodb.log_waits
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          description: Writes that waited because the log buffer was full. Above 0 means innodb_log_buffer_size is too small.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_innodb_log_waits
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: innodb
+        - uuid: f7762e1db0614a4b8f6ba6f4f82871ca
+          name: 'MySQL: Open tables'
+          type: DEPENDENT
+          key: mysql.open_tables
+          delay: '0'
+          value_type: UNSIGNED
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_open_tables
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: tables
+        - uuid: e58611725ca7488e93ecfaf681b86bd4
+          name: 'MySQL: table_open_cache'
+          type: DEPENDENT
+          key: mysql.table_open_cache
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_variables_table_open_cache
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: tables
+        - uuid: 53f7b27f337649f08f1af35ba342c11d
+          name: 'MySQL: Table cache usage'
+          type: CALCULATED
+          key: mysql.table_open_cache.util
+          value_type: FLOAT
+          params: 100*last(//mysql.open_tables)/last(//mysql.table_open_cache)
+          units: '%'
+          description: Open table instances as a share of table_open_cache. A table used by two connections at once takes two entries, so with many tenant databases this sits at 100% and MySQL evicts the least recently used table. That is normal; the misses item says whether it costs anything.
+          tags:
+            - tag: component
+              value: tables
+        - uuid: b0418720bf3249959e601ee3988204b0
+          name: 'MySQL: Table cache misses'
+          type: DEPENDENT
+          key: mysql.table_open_cache.misses
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          description: Table opens the cache could not serve. High right after a restart, then near 0 while the cache is big enough.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_table_open_cache_misses
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: tables
+          triggers:
+            - uuid: 47eb459b2d744680b611738dc676db38
+              expression: min(/MySQL by mysqld_exporter/mysql.table_open_cache.misses,30m)>{$MYSQL.TABLE_CACHE.MISSES.MAX}
+              name: 'MySQL: reopening more than {$MYSQL.TABLE_CACHE.MISSES.MAX} tables per second for 30m'
+              priority: WARNING
+              description: The table cache is too small for the working set, so MySQL keeps closing and reopening tables. Raise table_open_cache (SET PERSIST works without a restart, then put it in my.cnf), and table_definition_cache if the number of tables is close to it. Each entry costs memory, so watch the pod's memory afterwards. A freshly started server fills its cache first, so this stays quiet while the restart trigger is active.
+              dependencies:
+                - name: 'MySQL: restarted (uptime {ITEM.LASTVALUE1})'
+                  expression: last(/MySQL by mysqld_exporter/mysql.uptime)<{$MYSQL.RESTART.WINDOW}
+              tags:
+                - tag: scope
+                  value: tables
+        - uuid: 0b60ff5afbb746028499033db3e1b773
+          name: 'MySQL: Open table definitions'
+          type: DEPENDENT
+          key: mysql.open_table_definitions
+          delay: '0'
+          value_type: UNSIGNED
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_status_open_table_definitions
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: tables
+        - uuid: 074f599d7b8646ecba6984f9ed4135d7
+          name: 'MySQL: table_definition_cache'
+          type: DEPENDENT
+          key: mysql.table_definition_cache
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - mysql_global_variables_table_definition_cache
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: mysql.exporter.raw
+          tags:
+            - tag: component
+              value: tables
+      discovery_rules:
+        - uuid: af03ec337ff44f78b4ee51adde80ac43
+          name: Database discovery
+          type: DEPENDENT
+          key: mysql.schema.discovery
+          delay: '0'
+          description: One item per database. Stays empty unless the exporter runs with --collect.info_schema.tables. A database missing from the scrapes for an hour gets its item disabled, for 7 days deleted, so a MySQL restart leaves the items alone.
+          lifetime_type: DELETE_AFTER
+          lifetime: 7d
+          enabled_lifetime_type: DISABLE_AFTER
+          enabled_lifetime: 1h
+          master_item:
+            key: mysql.exporter.raw
+          filter:
+            conditions:
+              - macro: '{#SCHEMA}'
+                value: '{$MYSQL.SCHEMA.MATCHES}'
+                formulaid: A
+              - macro: '{#SCHEMA}'
+                value: '{$MYSQL.SCHEMA.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
+            evaltype: AND
+          lld_macro_paths:
+            - lld_macro: '{#SCHEMA}'
+              path: $.schema
+          preprocessing:
+            - type: PROMETHEUS_TO_JSON
+              parameters:
+                - mysql_info_schema_table_size{component="data_length"}
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |-
+                  var seen = {};
+                  JSON.parse(value).forEach(function (m) { seen[m.labels.schema] = true; });
+                  return JSON.stringify(Object.keys(seen).map(function (s) { return {schema: s}; }));
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          item_prototypes:
+            - uuid: 49109883258b4bdea4bbd6de5a8cbb43
+              name: 'Database {#SCHEMA}: size'
+              type: DEPENDENT
+              key: mysql.schema.size[{#SCHEMA}]
+              delay: '0'
+              units: B
+              description: Data plus indexes, from information_schema.tables. MySQL refreshes these statistics lazily (information_schema_stats_expiry), so the value moves in steps.
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - mysql_info_schema_table_size{schema="{#SCHEMA}",component=~"data_length|index_length"}
+                    - function
+                    - sum
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: mysql.exporter.raw
+              tags:
+                - tag: component
+                  value: storage
+                - tag: database
+                  value: '{#SCHEMA}'
+      tags:
+        - tag: class
+          value: database
+        - tag: target
+          value: mysql
+      macros:
+        - macro: '{$MYSQL.BUFFER_POOL.HIT.MIN}'
+          value: '95'
+          description: Lowest acceptable InnoDB buffer pool hit ratio, in percent, held for 15 minutes.
+        - macro: '{$MYSQL.CONN.UTIL.WARN}'
+          value: '80'
+          description: Connection usage, in percent of max_connections, held for 5 minutes before the Warning trigger fires.
+        - macro: '{$MYSQL.EXPORTER.SVC}'
+          value: mysql.mysql.svc.cluster.local:9104
+          description: host:port of the exporter as the cluster's Zabbix proxy reaches it.
+        - macro: '{$MYSQL.EXPORTER.TIMEOUT}'
+          value: 10s
+          description: Timeout for the scrape.
+        - macro: '{$MYSQL.NODATA}'
+          value: 5m
+          description: How long without an answer from the exporter before the no-data trigger fires.
+        - macro: '{$MYSQL.RESTART.WINDOW}'
+          value: '600'
+          description: Seconds after a start during which the restart trigger stays on.
+        - macro: '{$MYSQL.SCHEMA.MATCHES}'
+          value: .*
+          description: Databases to discover (regex).
+        - macro: '{$MYSQL.SCHEMA.NOT_MATCHES}'
+          value: ^(mysql|sys|performance_schema|information_schema)$
+          description: Databases to skip (regex).
+        - macro: '{$MYSQL.SLOW_QUERIES.MAX}'
+          value: '0.1'
+          description: Slow queries per second, held for 5 minutes, before the Warning trigger fires.
+        - macro: '{$MYSQL.TABLE_CACHE.MISSES.MAX}'
+          value: '1'
+          description: Table cache misses per second, held for 30 minutes, before the Warning trigger fires.
+      dashboards:
+        - uuid: a6fc531e269f471d9e0804a7bd33f238
+          name: MySQL
+          auto_start: 'NO'
+          pages:
+            - name: Overview
+              widgets:
+                - type: item
+                  name: Uptime
+                  x: '0'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        key: mysql.uptime
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: INTEGER
+                      name: value_size
+                      value: '20'
+                - type: item
+                  name: Connections
+                  x: '12'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        key: mysql.threads_connected
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                - type: item
+                  name: Connection usage
+                  x: '24'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        key: mysql.connections.util
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: thresholds.0.color
+                      value: FF465C
+                    - type: STRING
+                      name: thresholds.0.threshold
+                      value: '80'
+                - type: item
+                  name: Queries
+                  x: '36'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        key: mysql.questions
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '1'
+                - type: item
+                  name: Buffer pool hit ratio
+                  x: '48'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        key: mysql.innodb.hit_ratio
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '2'
+                - type: item
+                  name: Table cache misses
+                  x: '60'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        key: mysql.table_open_cache.misses
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '2'
+                    - type: STRING
+                      name: thresholds.0.color
+                      value: FF465C
+                    - type: STRING
+                      name: thresholds.0.threshold
+                      value: '1'
+                - type: graph
+                  name: Connections
+                  x: '0'
+                  y: '3'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        name: 'MySQL: Connections'
+                - type: graph
+                  name: Statements
+                  x: '36'
+                  y: '3'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        name: 'MySQL: Statements'
+                - type: graph
+                  name: InnoDB buffer pool
+                  x: '0'
+                  y: '8'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        name: 'MySQL: InnoDB buffer pool'
+                - type: graph
+                  name: InnoDB reads
+                  x: '36'
+                  y: '8'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        name: 'MySQL: InnoDB reads'
+                - type: graph
+                  name: Table cache
+                  x: '0'
+                  y: '13'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        name: 'MySQL: Table cache'
+                - type: graph
+                  name: InnoDB I/O
+                  x: '36'
+                  y: '13'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: MySQL by mysqld_exporter
+                        name: 'MySQL: InnoDB I/O'
+                - type: topitems
+                  name: Largest databases
+                  x: '0'
+                  y: '18'
+                  width: '72'
+                  height: '6'
+                  fields:
+                    - type: INTEGER
+                      name: layout
+                      value: '1'
+                    - type: INTEGER
+                      name: show_column_header
+                      value: '0'
+                    - type: INTEGER
+                      name: problems
+                      value: '2'
+                    - type: STRING
+                      name: columns.0.items.0
+                      value: 'Database *: size'
+                    - type: INTEGER
+                      name: columns.0.display
+                      value: '2'
+                    - type: STRING
+                      name: columns.0.min
+                      value: '0'
+                    - type: INTEGER
+                      name: item_ordering_order
+                      value: '2'
+                    - type: INTEGER
+                      name: item_ordering_limit
+                      value: '15'
+  graphs:
+    - uuid: 50e3d490c55d469fb291f4c35e74b2b3
+      name: 'MySQL: Connections'
+      graph_items:
+        - sortorder: '0'
+          color: 2774A4
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.threads_connected
+        - sortorder: '1'
+          color: F4B400
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.threads_running
+        - sortorder: '2'
+          color: E53935
+          drawtype: DASHED_LINE
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.max_connections
+    - uuid: 99cd602e966f4daf9ccbef7238146a8b
+      name: 'MySQL: Statements'
+      graph_items:
+        - sortorder: '0'
+          color: 2774A4
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.com.select
+        - sortorder: '1'
+          color: 1A7C11
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.com.insert
+        - sortorder: '2'
+          color: F4B400
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.com.update
+        - sortorder: '3'
+          color: E53935
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.com.delete
+    - uuid: 6319941533c34f3286a2d6e2ac1f8c6a
+      name: 'MySQL: InnoDB buffer pool'
+      graph_items:
+        - sortorder: '0'
+          color: 8E8E8E
+          drawtype: DASHED_LINE
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.innodb.buffer_pool_size
+        - sortorder: '1'
+          color: 2774A4
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.innodb.buffer_pool_data
+        - sortorder: '2'
+          color: F4B400
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.innodb.buffer_pool_dirty
+    - uuid: 7652ed22f83c40f189a5f9b0ec4d927a
+      name: 'MySQL: InnoDB reads'
+      graph_items:
+        - sortorder: '0'
+          color: 2774A4
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.innodb.read_requests
+        - sortorder: '1'
+          color: E53935
+          yaxisside: RIGHT
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.innodb.reads
+    - uuid: 05cd2481e5f34829b75eb36e4ed34552
+      name: 'MySQL: InnoDB I/O'
+      graph_items:
+        - sortorder: '0'
+          color: 2774A4
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.innodb.data_read
+        - sortorder: '1'
+          color: 1A7C11
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.innodb.data_written
+    - uuid: 26e5ab1f0944477a87ae3a535e798134
+      name: 'MySQL: Traffic'
+      graph_items:
+        - sortorder: '0'
+          color: 2774A4
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.bytes_received
+        - sortorder: '1'
+          color: 1A7C11
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.bytes_sent
+    - uuid: 43608e18a8cc4312910c55c7dfa61ea8
+      name: 'MySQL: Table cache'
+      graph_items:
+        - sortorder: '0'
+          color: 2774A4
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.open_tables
+        - sortorder: '1'
+          color: E53935
+          drawtype: DASHED_LINE
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.table_open_cache
+        - sortorder: '2'
+          color: F4B400
+          yaxisside: RIGHT
+          item:
+            host: MySQL by mysqld_exporter
+            key: mysql.table_open_cache.misses

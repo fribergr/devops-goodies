@@ -1,0 +1,68 @@
+# One redis_exporter per cluster, scraping every installation's Redis on demand:
+#   GET /scrape?target=redis://redis.<namespace>.svc.cluster.local:6379
+# Put it in the namespace where the Zabbix proxy runs (here: zabbix).
+#
+# The password file maps each target URI to its requirepass. The key must be
+# exactly the string in the Zabbix host macro {$REDIS.TARGET}. Create it as a
+# plain Secret first and seal it, e.g.:
+#
+#   cat > passwords.json <<'JSON'
+#   {
+#     "redis://redis.hit-abc123.svc.cluster.local:6379": "…",
+#     "redis://redis.hit-def456.svc.cluster.local:6379": "…"
+#   }
+#   JSON
+#   kubectl -n zabbix create secret generic redis-exporter-passwords \
+#     --from-file=passwords.json --dry-run=client -o yaml \
+#     | kubeseal -o yaml > redis-exporter-passwords.sealed.yaml
+#
+# A new installation = one more line in passwords.json, reseal, and the exporter
+# pod must restart to read it (the file is read at startup).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-exporter
+  namespace: zabbix
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: redis-exporter }
+  template:
+    metadata:
+      labels: { app: redis-exporter }
+    spec:
+      containers:
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.92.1
+          args:
+            - --redis.addr=            # no default target: only /scrape?target=… is used
+            - --redis.password-file=/secrets/passwords.json
+          ports:
+            - { name: metrics, containerPort: 9121 }
+          readinessProbe:
+            httpGet: { path: /health, port: metrics }
+          livenessProbe:
+            httpGet: { path: /health, port: metrics }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - { name: passwords, mountPath: /secrets, readOnly: true }
+      volumes:
+        - name: passwords
+          secret:
+            secretName: redis-exporter-passwords
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-exporter
+  namespace: zabbix
+spec:
+  selector: { app: redis-exporter }
+  ports:
+    - { name: metrics, port: 9121, targetPort: metrics }

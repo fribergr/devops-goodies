@@ -1,0 +1,1977 @@
+zabbix_export:
+  version: '7.4'
+  template_groups:
+    - uuid: a571c0d144b14fd4a87a9d9b2aa9fcd6
+      name: Templates/Applications
+  templates:
+    - uuid: 319caed11a904e609af060ccec03eacb
+      template: GitLab Runner by HTTP
+      name: GitLab Runner by HTTP
+      description: |-
+        Monitors one gitlab-runner process through its built-in Prometheus metrics endpoint. No agent or UserParameters needed.
+
+        Setup:
+        1. In the gitlab-runner config.toml, set listen_address = ":9252" in the global section and restart gitlab-runner. For a runner in Docker, also publish the port (-p 9252:9252).
+        2. Create one Zabbix host per gitlab-runner process (one metrics endpoint), link this template and set {$GITLAB_RUNNER.METRICS.URL}, e.g. http://rpi5:9252/metrics.
+        3. Each [[runners]] section of that process is discovered automatically.
+
+        Counters reset when gitlab-runner restarts; the first poll after a restart is discarded rather than reported as a negative value.
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: 8bcdbfcc076541e68a5a0057c127af62
+          name: Get metrics
+          type: HTTP_AGENT
+          key: gitlab_runner.metrics.get
+          delay: '{$GITLAB_RUNNER.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          url: '{$GITLAB_RUNNER.METRICS.URL}'
+          timeout: 10s
+          description: Raw Prometheus metrics from the gitlab-runner metrics endpoint (listen_address in config.toml).
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 5832080347184eddb08d86c7fa0e28cf
+          name: 'Get metrics: parsed'
+          type: DEPENDENT
+          key: gitlab_runner.metrics.parsed
+          delay: '0'
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          description: The metrics parsed into JSON with per-runner and total values. All other items read from this item.
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  // Turns gitlab-runner's Prometheus text output into one JSON document that all other items read from.
+                  // Metrics that gitlab-runner only exposes after the first job (jobs, durations, failures) default to 0,
+                  // so dependent items never go unsupported on an idle runner.
+                  var JOB_SIDE_FAILURES = {script_failure: true, job_execution_timeout: true};
+                  var COUNTERS = ['jobs_running', 'jobs_started', 'jobs_finished', 'job_seconds', 'queue_seconds',
+                      'failed_job', 'failed_system', 'api_errors'];
+                  var data = {
+                      version: '',
+                      concurrent: -1,
+                      log_errors: 0,
+                      log_warnings: 0,
+                      process: {start_time: 0, uptime: 0, cpu_seconds: 0, memory_rss: 0},
+                      totals: {},
+                      runners: {}
+                  };
+                  var line_re = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?\s+(\S+)/;
+
+                  function parseLabels(str) {
+                      var labels = {}, re = /([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/g, m;
+
+                      while ((m = re.exec(str || '')) !== null) {
+                          labels[m[1]] = m[2].replace(/\\(.)/g, function (all, c) {
+                              return c === 'n' ? '\n' : c;
+                          });
+                      }
+
+                      return labels;
+                  }
+
+                  function getRunner(labels) {
+                      var id = labels.runner;
+
+                      if (typeof id === 'undefined' || id === '') {
+                          return null;
+                      }
+
+                      if (!data.runners.hasOwnProperty(id)) {
+                          // healthy: 1 = healthy, 0 = unhealthy, 2 = not reported (gitlab_runner_worker_healthy needs a recent gitlab-runner).
+                          data.runners[id] = {name: id, limit: 0, healthy: 2};
+                          COUNTERS.forEach(function (c) {
+                              data.runners[id][c] = 0;
+                          });
+                      }
+
+                      // runner_name was added in gitlab-runner 17.x; older versions only expose the short token.
+                      if (labels.runner_name) {
+                          data.runners[id].name = labels.runner_name;
+                      }
+
+                      return data.runners[id];
+                  }
+
+                  value.split('\n').forEach(function (line) {
+                      var m = line_re.exec(line), name, v, labels, runner;
+
+                      if (m === null || (m[1].indexOf('gitlab_runner_') !== 0 && m[1].indexOf('process_') !== 0)) {
+                          return;
+                      }
+
+                      name = m[1];
+                      v = parseFloat(m[3]);
+                      if (isNaN(v)) {
+                          return;
+                      }
+                      labels = parseLabels(m[2]);
+
+                      switch (name) {
+                          case 'gitlab_runner_version_info':
+                              data.version = labels.version || '';
+                              return;
+                          case 'gitlab_runner_concurrent':
+                              data.concurrent = v;
+                              return;
+                          case 'gitlab_runner_errors_total':
+                              if (labels.level === 'warning') {
+                                  data.log_warnings += v;
+                              }
+                              else {
+                                  data.log_errors += v;
+                              }
+                              return;
+                          case 'process_start_time_seconds':
+                              data.process.start_time = v;
+                              return;
+                          case 'process_cpu_seconds_total':
+                              data.process.cpu_seconds = v;
+                              return;
+                          case 'process_resident_memory_bytes':
+                              data.process.memory_rss = v;
+                              return;
+                      }
+
+                      runner = getRunner(labels);
+                      if (runner === null) {
+                          return;
+                      }
+
+                      switch (name) {
+                          case 'gitlab_runner_worker_healthy':
+                              runner.healthy = v;
+                              break;
+                          case 'gitlab_runner_limit':
+                              runner.limit = v;
+                              break;
+                          case 'gitlab_runner_jobs':
+                              runner.jobs_running += v;
+                              break;
+                          case 'gitlab_runner_jobs_total':
+                              runner.jobs_started += v;
+                              break;
+                          case 'gitlab_runner_job_duration_seconds_count':
+                              runner.jobs_finished += v;
+                              break;
+                          case 'gitlab_runner_job_duration_seconds_sum':
+                              runner.job_seconds += v;
+                              break;
+                          case 'gitlab_runner_job_queue_duration_seconds_sum':
+                              runner.queue_seconds += v;
+                              break;
+                          case 'gitlab_runner_failed_jobs_total':
+                              if (JOB_SIDE_FAILURES.hasOwnProperty(labels.failure_reason)) {
+                                  runner.failed_job += v;
+                              }
+                              else {
+                                  runner.failed_system += v;
+                              }
+                              break;
+                          case 'gitlab_runner_api_request_statuses_total':
+                              if (!(parseInt(labels.status, 10) < 400)) {
+                                  runner.api_errors += v;
+                              }
+                              break;
+                      }
+                  });
+
+                  if (data.concurrent < 0) {
+                      throw 'Cannot find the gitlab_runner_concurrent metric. Check that {$GITLAB_RUNNER.METRICS.URL} points to the metrics endpoint of a gitlab-runner.';
+                  }
+
+                  COUNTERS.forEach(function (c) {
+                      data.totals[c] = 0;
+                      Object.keys(data.runners).forEach(function (id) {
+                          data.totals[c] += data.runners[id][c];
+                      });
+                  });
+                  data.totals.slot_utilization = data.concurrent > 0 ? 100 * data.totals.jobs_running / data.concurrent : 0;
+
+                  if (data.process.start_time > 0) {
+                      data.process.uptime = Math.max(0, Math.round(Date.now() / 1000 - data.process.start_time));
+                  }
+
+                  return JSON.stringify(data);
+          master_item:
+            key: gitlab_runner.metrics.get
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 4048bb72b29b49f0a110b037a80eaf99
+          name: Version
+          type: DEPENDENT
+          key: gitlab_runner.version
+          delay: '0'
+          value_type: CHAR
+          description: gitlab-runner version.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.version
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: system
+          trends: '0'
+          triggers:
+            - uuid: 982aa226cc5741ab9121b9b25d4f8f95
+              expression: last(/GitLab Runner by HTTP/gitlab_runner.version,#1)<>last(/GitLab Runner by HTTP/gitlab_runner.version,#2) and length(last(/GitLab Runner by HTTP/gitlab_runner.version))>0
+              name: 'GitLab Runner: Version has changed'
+              priority: INFO
+              description: The gitlab-runner version has changed. Acknowledge to close the problem manually.
+              tags:
+                - tag: scope
+                  value: notice
+              event_name: 'GitLab Runner: Version has changed (new version: {ITEM.VALUE})'
+              manual_close: 'YES'
+        - uuid: e8e58cb3f5a143fdafee4ae5225565c9
+          name: Uptime
+          type: DEPENDENT
+          key: gitlab_runner.uptime
+          delay: '0'
+          value_type: UNSIGNED
+          description: Time since the gitlab-runner process started.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.process.uptime
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: system
+          units: uptime
+          triggers:
+            - uuid: dcbfd29f4c7147b2ad80ff489ef73b67
+              expression: nodata(/GitLab Runner by HTTP/gitlab_runner.uptime,{$GITLAB_RUNNER.NODATA.TIMEOUT})=1
+              name: 'GitLab Runner: No metrics received'
+              priority: AVERAGE
+              description: No metrics have been received for {$GITLAB_RUNNER.NODATA.TIMEOUT}. The runner is down, the metrics endpoint is not reachable, or the response is not gitlab-runner metrics. See the "Get metrics" item for the error.
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: 02d49c3124e84fd9aeea1e128746f2dc
+              expression: last(/GitLab Runner by HTTP/gitlab_runner.uptime)<10m
+              name: 'GitLab Runner: Has been restarted'
+              priority: INFO
+              description: The gitlab-runner process uptime is less than 10 minutes. Counters were reset.
+              tags:
+                - tag: scope
+                  value: notice
+              event_name: 'GitLab Runner: Has been restarted (uptime < 10m)'
+              manual_close: 'YES'
+              dependencies:
+                - name: 'GitLab Runner: No metrics received'
+                  expression: nodata(/GitLab Runner by HTTP/gitlab_runner.uptime,{$GITLAB_RUNNER.NODATA.TIMEOUT})=1
+        - uuid: 6d1f3b3c6a25455dbb8e90f45a47045d
+          name: Concurrent job limit
+          type: DEPENDENT
+          key: gitlab_runner.concurrent
+          delay: '0'
+          value_type: UNSIGNED
+          description: 'The global "concurrent" setting: the maximum number of jobs this gitlab-runner process runs at once.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.concurrent
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: jobs
+        - uuid: 7e46f1ce26b446a59473959248a88e46
+          name: Jobs running
+          type: DEPENDENT
+          key: gitlab_runner.jobs.running
+          delay: '0'
+          value_type: UNSIGNED
+          description: Jobs currently being processed by all runners of this gitlab-runner process.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.totals.jobs_running
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: jobs
+        - uuid: 7bb54508fb5843689adfeea09976b5f6
+          name: Job slot utilization
+          type: DEPENDENT
+          key: gitlab_runner.slots.utilization
+          delay: '0'
+          value_type: FLOAT
+          description: Running jobs as a percentage of the "concurrent" setting.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.totals.slot_utilization
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: jobs
+          units: '%'
+          triggers:
+            - uuid: 5c828a0d6fb6439393b9d63070bfc6ad
+              expression: min(/GitLab Runner by HTTP/gitlab_runner.slots.utilization,{$GITLAB_RUNNER.SLOTS.UTIL.PERIOD})>={$GITLAB_RUNNER.SLOTS.UTIL.MAX}
+              name: 'GitLab Runner: All job slots are busy'
+              priority: WARNING
+              description: Job slot utilization has been at or above {$GITLAB_RUNNER.SLOTS.UTIL.MAX}% for {$GITLAB_RUNNER.SLOTS.UTIL.PERIOD}. New jobs have to wait; consider raising "concurrent".
+              tags:
+                - tag: scope
+                  value: capacity
+              event_name: 'GitLab Runner: All job slots are busy (>= {$GITLAB_RUNNER.SLOTS.UTIL.MAX}% for {$GITLAB_RUNNER.SLOTS.UTIL.PERIOD})'
+              opdata: 'Running: {ITEM.LASTVALUE1}'
+        - uuid: 3df15b2878de4ea0ad7e07f89f4c592e
+          name: Jobs started
+          type: DEPENDENT
+          key: gitlab_runner.jobs.started
+          delay: '0'
+          value_type: UNSIGNED
+          description: Jobs picked up since the previous poll.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.totals.jobs_started
+            - &id001
+              type: SIMPLE_CHANGE
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: jobs
+        - uuid: 98af2c3add0b49d59f1afe6233475ea4
+          name: Jobs finished
+          type: DEPENDENT
+          key: gitlab_runner.jobs.finished
+          delay: '0'
+          value_type: UNSIGNED
+          description: Jobs finished (any result) since the previous poll.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.totals.jobs_finished
+            - *id001
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: jobs
+        - uuid: 184e3b7da6a94f61b8347f639a35af76
+          name: Job run time
+          type: DEPENDENT
+          key: gitlab_runner.jobs.duration
+          delay: '0'
+          value_type: FLOAT
+          description: Total run time of the jobs that finished since the previous poll.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.totals.job_seconds
+            - *id001
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: jobs
+          units: s
+        - uuid: d99b385348154720aee49f70497e679c
+          name: Job queue time
+          type: DEPENDENT
+          key: gitlab_runner.jobs.queue
+          delay: '0'
+          value_type: FLOAT
+          description: Total time the jobs started since the previous poll spent queued in GitLab before pickup.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.totals.queue_seconds
+            - *id001
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: jobs
+          units: s
+        - uuid: df9586863c6b401ba3a5f2a8f24a0c69
+          name: 'Jobs failed: job errors'
+          type: DEPENDENT
+          key: gitlab_runner.jobs.failed.job
+          delay: '0'
+          value_type: UNSIGNED
+          description: Jobs that failed since the previous poll because of the job itself (script_failure, job_execution_timeout).
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.totals.failed_job
+            - *id001
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: jobs
+        - uuid: 17287ab331444213ba2cdf4b53db2812
+          name: 'Jobs failed: runner errors'
+          type: DEPENDENT
+          key: gitlab_runner.jobs.failed.system
+          delay: '0'
+          value_type: UNSIGNED
+          description: Jobs that failed since the previous poll for any other reason (runner_system_failure, image_pull_failure, unknown_failure, ...).
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.totals.failed_system
+            - *id001
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: jobs
+        - uuid: 1e8dd5b5c8ec424fbf580cf0d1f38b8f
+          name: Jobs finished, last 24h
+          type: CALCULATED
+          key: gitlab_runner.jobs.finished.24h
+          delay: 5m
+          value_type: UNSIGNED
+          params: sum(//gitlab_runner.jobs.finished,24h)
+          description: Jobs finished in the last 24 hours.
+          tags:
+            - tag: component
+              value: jobs
+        - uuid: 319a98cff9b448eba8effc15f55775bd
+          name: Jobs failed, last 24h
+          type: CALCULATED
+          key: gitlab_runner.jobs.failed.24h
+          delay: 5m
+          value_type: UNSIGNED
+          params: sum(//gitlab_runner.jobs.failed.job,24h) + sum(//gitlab_runner.jobs.failed.system,24h)
+          description: Jobs failed (any reason) in the last 24 hours.
+          tags:
+            - tag: component
+              value: jobs
+        - uuid: 363bcc853cca41d28623452db2cfddbe
+          name: Average job duration, last 24h
+          type: CALCULATED
+          key: gitlab_runner.jobs.duration.avg.24h
+          delay: 5m
+          value_type: FLOAT
+          params: (sum(//gitlab_runner.jobs.duration,24h) - (sum(//gitlab_runner.jobs.finished,24h)=0)) / (sum(//gitlab_runner.jobs.finished,24h) + (sum(//gitlab_runner.jobs.finished,24h)=0))
+          description: Average run time of the jobs that finished in the last 24 hours. No value when no jobs finished.
+          tags:
+            - tag: component
+              value: jobs
+          units: s
+          preprocessing: &id002
+            - type: IN_RANGE
+              parameters:
+                - '0'
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - return Math.round(value);
+        - uuid: 72ca2f85c9e24f2b9329936a79176536
+          name: Average queue time, last 24h
+          type: CALCULATED
+          key: gitlab_runner.jobs.queue.avg.24h
+          delay: 5m
+          value_type: FLOAT
+          params: (sum(//gitlab_runner.jobs.queue,24h) - (sum(//gitlab_runner.jobs.started,24h)=0)) / (sum(//gitlab_runner.jobs.started,24h) + (sum(//gitlab_runner.jobs.started,24h)=0))
+          description: Average time jobs waited in the GitLab queue before this runner picked them up, last 24 hours. No value when no jobs started.
+          tags:
+            - tag: component
+              value: jobs
+          units: s
+          preprocessing: *id002
+        - uuid: 98e53ea01a3349e888606aada5d951ca
+          name: 'Log: Errors'
+          type: DEPENDENT
+          key: gitlab_runner.log.errors
+          delay: '0'
+          value_type: UNSIGNED
+          description: Error, fatal and panic level log messages since the previous poll.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.log_errors
+            - *id001
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: system
+          triggers:
+            - uuid: fd63012a11b24aa8a2f912f96b2ce110
+              expression: sum(/GitLab Runner by HTTP/gitlab_runner.log.errors,15m)>{$GITLAB_RUNNER.LOG.ERRORS.MAX}
+              name: 'GitLab Runner: Errors in the runner log'
+              priority: INFO
+              description: gitlab-runner logged more than {$GITLAB_RUNNER.LOG.ERRORS.MAX} errors in the last 15 minutes. Check the runner log (journalctl -u gitlab-runner or docker logs).
+              tags:
+                - tag: scope
+                  value: notice
+              opdata: 'Errors in the last poll: {ITEM.LASTVALUE1}'
+        - uuid: 511dceaf52514885b3c1e166ced9551a
+          name: 'Log: Warnings'
+          type: DEPENDENT
+          key: gitlab_runner.log.warnings
+          delay: '0'
+          value_type: UNSIGNED
+          description: Warning level log messages since the previous poll.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.log_warnings
+            - *id001
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: system
+        - uuid: a756e78cd1114e769aed216bca142f42
+          name: 'Process: CPU utilization'
+          type: DEPENDENT
+          key: gitlab_runner.process.cpu.util
+          delay: '0'
+          value_type: FLOAT
+          description: CPU used by the gitlab-runner process itself (not by the jobs it runs), in % of one core.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.process.cpu_seconds
+            - type: CHANGE_PER_SECOND
+            - type: MULTIPLIER
+              parameters:
+                - '100'
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: system
+          units: '%'
+        - uuid: 0f14a15d8fef421f98e44552591b8e8b
+          name: 'Process: Memory usage'
+          type: DEPENDENT
+          key: gitlab_runner.process.memory.rss
+          delay: '0'
+          value_type: UNSIGNED
+          description: Resident memory of the gitlab-runner process.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.process.memory_rss
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          tags:
+            - tag: component
+              value: system
+          units: B
+      discovery_rules:
+        - uuid: b58fbbcf3c504c00a5ce8526c2c35edd
+          name: Runner discovery
+          type: DEPENDENT
+          key: gitlab_runner.runner.discovery
+          delay: '0'
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#RUNNER.NAME}'
+                value: '{$GITLAB_RUNNER.LLD.FILTER.NAME.MATCHES}'
+              - macro: '{#RUNNER.NAME}'
+                value: '{$GITLAB_RUNNER.LLD.FILTER.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+          description: Discovers the [[runners]] sections of this gitlab-runner process.
+          item_prototypes:
+            - uuid: e939ea91bc0a4cf3854dd68fae91c232
+              name: 'Runner [{#RUNNER.NAME}]: Health'
+              type: DEPENDENT
+              key: gitlab_runner.runner.healthy[{#RUNNER}]
+              delay: '0'
+              value_type: UNSIGNED
+              description: Whether the runner is requesting jobs. gitlab-runner marks a runner unhealthy after unhealthy_requests_limit (default 3) failed job requests in a row and then stops requesting jobs for unhealthy_interval (default 60m). "Not reported" means this gitlab-runner version does not expose gitlab_runner_worker_healthy.
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.runners['{#RUNNER}'].healthy
+              master_item:
+                key: gitlab_runner.metrics.parsed
+              tags:
+                - tag: component
+                  value: availability
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+              valuemap:
+                name: GitLab Runner health
+              trigger_prototypes:
+                - uuid: 889df1827dc045619cb7b4d2905012cd
+                  expression: last(/GitLab Runner by HTTP/gitlab_runner.runner.healthy[{#RUNNER}])=0
+                  name: 'GitLab Runner: Runner [{#RUNNER.NAME}]: Not requesting jobs (unhealthy)'
+                  priority: AVERAGE
+                  description: 'gitlab-runner has given up requesting jobs for this runner after repeated failed requests, so jobs for it stay pending. Usual causes: the runner token was revoked or the runner was deleted in GitLab (403), or GitLab is unreachable from the runner host. It retries after unhealthy_interval (60m by default); restarting gitlab-runner retries immediately.'
+                  tags:
+                    - tag: scope
+                      value: availability
+            - uuid: 2d7306707ad14c6e89e78b2c8bf3e284
+              name: 'Runner [{#RUNNER.NAME}]: Jobs running'
+              type: DEPENDENT
+              key: gitlab_runner.runner.jobs.running[{#RUNNER}]
+              delay: '0'
+              value_type: UNSIGNED
+              description: Jobs currently being processed by this runner.
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.runners['{#RUNNER}'].jobs_running
+              master_item:
+                key: gitlab_runner.metrics.parsed
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+            - uuid: 959f4c39fd94404cb213cafca483bc55
+              name: 'Runner [{#RUNNER.NAME}]: Job limit'
+              type: DEPENDENT
+              key: gitlab_runner.runner.limit[{#RUNNER}]
+              delay: '0'
+              value_type: UNSIGNED
+              description: The "limit" setting of this runner (0 = no limit of its own, only "concurrent" applies).
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.runners['{#RUNNER}'].limit
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: gitlab_runner.metrics.parsed
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+            - uuid: 45ae23a28ebf49c5a6672c3d3ff0b235
+              name: 'Runner [{#RUNNER.NAME}]: Jobs started'
+              type: DEPENDENT
+              key: gitlab_runner.runner.jobs.started[{#RUNNER}]
+              delay: '0'
+              value_type: UNSIGNED
+              description: Jobs picked up by this runner since the previous poll.
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.runners['{#RUNNER}'].jobs_started
+                - *id001
+              master_item:
+                key: gitlab_runner.metrics.parsed
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+            - uuid: f25f2b1c46c747fc98c8ed38beb2a384
+              name: 'Runner [{#RUNNER.NAME}]: Jobs finished'
+              type: DEPENDENT
+              key: gitlab_runner.runner.jobs.finished[{#RUNNER}]
+              delay: '0'
+              value_type: UNSIGNED
+              description: Jobs finished (any result) by this runner since the previous poll.
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.runners['{#RUNNER}'].jobs_finished
+                - *id001
+              master_item:
+                key: gitlab_runner.metrics.parsed
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+            - uuid: 6933f5dd91c84386a0a2261fd28dff18
+              name: 'Runner [{#RUNNER.NAME}]: Job run time'
+              type: DEPENDENT
+              key: gitlab_runner.runner.jobs.duration[{#RUNNER}]
+              delay: '0'
+              value_type: FLOAT
+              description: Total run time of the jobs this runner finished since the previous poll.
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.runners['{#RUNNER}'].job_seconds
+                - *id001
+              master_item:
+                key: gitlab_runner.metrics.parsed
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+              units: s
+            - uuid: 42d7e751aed3436d8bcfc138ac243ebd
+              name: 'Runner [{#RUNNER.NAME}]: Job queue time'
+              type: DEPENDENT
+              key: gitlab_runner.runner.jobs.queue[{#RUNNER}]
+              delay: '0'
+              value_type: FLOAT
+              description: Total time the jobs this runner started since the previous poll spent queued in GitLab.
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.runners['{#RUNNER}'].queue_seconds
+                - *id001
+              master_item:
+                key: gitlab_runner.metrics.parsed
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+              units: s
+            - uuid: 54262382c3e841408b7064d940cd1f5a
+              name: 'Runner [{#RUNNER.NAME}]: Jobs failed: job errors'
+              type: DEPENDENT
+              key: gitlab_runner.runner.jobs.failed.job[{#RUNNER}]
+              delay: '0'
+              value_type: UNSIGNED
+              description: Jobs that failed because of the job itself (script_failure, job_execution_timeout) since the previous poll.
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.runners['{#RUNNER}'].failed_job
+                - *id001
+              master_item:
+                key: gitlab_runner.metrics.parsed
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+            - uuid: a4718b379f2242778fcdb6f76d32ecdf
+              name: 'Runner [{#RUNNER.NAME}]: Jobs failed: runner errors'
+              type: DEPENDENT
+              key: gitlab_runner.runner.jobs.failed.system[{#RUNNER}]
+              delay: '0'
+              value_type: UNSIGNED
+              description: Jobs that failed for any other reason (runner_system_failure, image_pull_failure, unknown_failure, ...) since the previous poll.
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.runners['{#RUNNER}'].failed_system
+                - *id001
+              master_item:
+                key: gitlab_runner.metrics.parsed
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+              trigger_prototypes:
+                - uuid: f97c6f5425a341629fcc215ea1fd6d50
+                  expression: sum(/GitLab Runner by HTTP/gitlab_runner.runner.jobs.failed.system[{#RUNNER}],1h)>{$GITLAB_RUNNER.FAILED.SYSTEM.MAX:"{#RUNNER.NAME}"}
+                  name: 'GitLab Runner: Runner [{#RUNNER.NAME}]: Jobs failed because of runner errors'
+                  priority: WARNING
+                  description: Jobs on this runner failed in the last hour for reasons other than the job script, such as runner_system_failure or image_pull_failure. That usually points at the runner host, the executor (Docker) or the network. Clears once an hour has passed without such failures.
+                  tags:
+                    - tag: scope
+                      value: availability
+                  opdata: 'Last poll: {ITEM.LASTVALUE1}'
+            - uuid: 2de548838c9c4bb9be9f6ecb7d821d21
+              name: 'Runner [{#RUNNER.NAME}]: GitLab API errors'
+              type: DEPENDENT
+              key: gitlab_runner.runner.api.errors[{#RUNNER}]
+              delay: '0'
+              value_type: UNSIGNED
+              description: Requests from this runner to the GitLab API answered with HTTP 4xx/5xx since the previous poll.
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.runners['{#RUNNER}'].api_errors
+                - *id001
+              master_item:
+                key: gitlab_runner.metrics.parsed
+              tags:
+                - tag: component
+                  value: api
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+              trigger_prototypes:
+                - uuid: 9f5dba8d5a8145a3b70a18d1056ef0c8
+                  expression: sum(/GitLab Runner by HTTP/gitlab_runner.runner.api.errors[{#RUNNER}],15m)>{$GITLAB_RUNNER.API.ERRORS.MAX:"{#RUNNER.NAME}"}
+                  name: 'GitLab Runner: Runner [{#RUNNER.NAME}]: GitLab API returns errors'
+                  priority: WARNING
+                  description: More than {$GITLAB_RUNNER.API.ERRORS.MAX} requests from this runner to GitLab were answered with HTTP 4xx/5xx in the last 15 minutes, e.g. GitLab returning 5xx or rate limiting (429).
+                  tags:
+                    - tag: scope
+                      value: availability
+                  opdata: 'Last poll: {ITEM.LASTVALUE1}'
+                  dependencies:
+                    - name: 'GitLab Runner: Runner [{#RUNNER.NAME}]: Not requesting jobs (unhealthy)'
+                      expression: last(/GitLab Runner by HTTP/gitlab_runner.runner.healthy[{#RUNNER}])=0
+            - uuid: d51055d636b84aa6a8646d71e16c715f
+              name: 'Runner [{#RUNNER.NAME}]: Jobs finished, last hour'
+              type: CALCULATED
+              key: gitlab_runner.runner.jobs.finished.1h[{#RUNNER}]
+              delay: 1m
+              value_type: UNSIGNED
+              params: sum(//gitlab_runner.runner.jobs.finished[{#RUNNER}],1h)
+              description: Jobs finished by this runner in the last hour.
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+            - uuid: 8f5da8dc1c914ebc97240c2e01e2adea
+              name: 'Runner [{#RUNNER.NAME}]: Jobs failed, last hour'
+              type: CALCULATED
+              key: gitlab_runner.runner.jobs.failed.1h[{#RUNNER}]
+              delay: 1m
+              value_type: UNSIGNED
+              params: sum(//gitlab_runner.runner.jobs.failed.job[{#RUNNER}],1h) + sum(//gitlab_runner.runner.jobs.failed.system[{#RUNNER}],1h)
+              description: Jobs failed (any reason) on this runner in the last hour.
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+            - uuid: 78a3638bcf95472991c64c798e130ad5
+              name: 'Runner [{#RUNNER.NAME}]: Average job duration, last hour'
+              type: CALCULATED
+              key: gitlab_runner.runner.jobs.duration.avg.1h[{#RUNNER}]
+              delay: 1m
+              value_type: FLOAT
+              params: (sum(//gitlab_runner.runner.jobs.duration[{#RUNNER}],1h) - (sum(//gitlab_runner.runner.jobs.finished[{#RUNNER}],1h)=0)) / (sum(//gitlab_runner.runner.jobs.finished[{#RUNNER}],1h) + (sum(//gitlab_runner.runner.jobs.finished[{#RUNNER}],1h)=0))
+              description: Average run time of the jobs this runner finished in the last hour. No value when none finished.
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+              units: s
+              preprocessing: *id002
+            - uuid: 0a8a4a1899eb4814857e9f8830dca6b2
+              name: 'Runner [{#RUNNER.NAME}]: Average queue time, last hour'
+              type: CALCULATED
+              key: gitlab_runner.runner.jobs.queue.avg.1h[{#RUNNER}]
+              delay: 1m
+              value_type: FLOAT
+              params: (sum(//gitlab_runner.runner.jobs.queue[{#RUNNER}],1h) - (sum(//gitlab_runner.runner.jobs.started[{#RUNNER}],1h)=0)) / (sum(//gitlab_runner.runner.jobs.started[{#RUNNER}],1h) + (sum(//gitlab_runner.runner.jobs.started[{#RUNNER}],1h)=0))
+              description: Average time the jobs this runner picked up in the last hour waited in the GitLab queue. No value when none started.
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: runner
+                  value: '{#RUNNER.NAME}'
+              units: s
+              preprocessing: *id002
+              trigger_prototypes:
+                - uuid: 83b300f7ed4147a7ba4b5013e0fcae38
+                  expression: last(/GitLab Runner by HTTP/gitlab_runner.runner.jobs.queue.avg.1h[{#RUNNER}])>{$GITLAB_RUNNER.QUEUE.TIME.MAX:"{#RUNNER.NAME}"}
+                  name: 'GitLab Runner: Runner [{#RUNNER.NAME}]: Jobs wait long in the queue'
+                  priority: WARNING
+                  description: Jobs picked up by this runner in the last hour waited more than {$GITLAB_RUNNER.QUEUE.TIME.MAX} on average before they started. The runner is probably saturated.
+                  tags:
+                    - tag: scope
+                      value: capacity
+                  opdata: 'Average queue time: {ITEM.LASTVALUE1}'
+          trigger_prototypes:
+            - uuid: ebd4ce27dc6f4761ac69330640db5c56
+              expression: last(/GitLab Runner by HTTP/gitlab_runner.runner.limit[{#RUNNER}])>0 and min(/GitLab Runner by HTTP/gitlab_runner.runner.jobs.running[{#RUNNER}],15m)>=last(/GitLab Runner by HTTP/gitlab_runner.runner.limit[{#RUNNER}])
+              name: 'GitLab Runner: Runner [{#RUNNER.NAME}]: Job limit reached'
+              priority: INFO
+              description: The runner has been running as many jobs as its "limit" setting allows for 15 minutes.
+              tags:
+                - tag: scope
+                  value: capacity
+              opdata: 'Running: {ITEM.LASTVALUE2}, limit: {ITEM.LASTVALUE1}'
+          graph_prototypes:
+            - uuid: 0baa3f58f17646f1aa37ee080c8c1e49
+              name: 'Runner [{#RUNNER.NAME}]: Jobs per hour'
+              graph_items:
+                - drawtype: GRADIENT_LINE
+                  color: 199C0D
+                  item:
+                    host: GitLab Runner by HTTP
+                    key: gitlab_runner.runner.jobs.finished.1h[{#RUNNER}]
+                - sortorder: '1'
+                  drawtype: BOLD_LINE
+                  color: F63100
+                  item:
+                    host: GitLab Runner by HTTP
+                    key: gitlab_runner.runner.jobs.failed.1h[{#RUNNER}]
+            - uuid: 3d3192f0e7dc431c8f1ce3d00ad8b503
+              name: 'Runner [{#RUNNER.NAME}]: Job duration and queue time'
+              graph_items:
+                - drawtype: GRADIENT_LINE
+                  color: 1A7C11
+                  item:
+                    host: GitLab Runner by HTTP
+                    key: gitlab_runner.runner.jobs.duration.avg.1h[{#RUNNER}]
+                - sortorder: '1'
+                  color: 2774A4
+                  item:
+                    host: GitLab Runner by HTTP
+                    key: gitlab_runner.runner.jobs.queue.avg.1h[{#RUNNER}]
+          master_item:
+            key: gitlab_runner.metrics.parsed
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var runners = JSON.parse(value).runners;
+
+                  return JSON.stringify(Object.keys(runners).map(function (id) {
+                      return {'{#RUNNER}': id, '{#RUNNER.NAME}': runners[id].name};
+                  }));
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+      macros:
+        - macro: '{$GITLAB_RUNNER.METRICS.URL}'
+          value: http://localhost:9252/metrics
+          description: URL of the gitlab-runner metrics endpoint (listen_address in config.toml). Set this on each host.
+        - macro: '{$GITLAB_RUNNER.INTERVAL}'
+          value: 1m
+          description: How often the metrics endpoint is polled.
+        - macro: '{$GITLAB_RUNNER.NODATA.TIMEOUT}'
+          value: 5m
+          description: Raise a problem when no metrics were received for this long.
+        - macro: '{$GITLAB_RUNNER.SLOTS.UTIL.MAX}'
+          value: '100'
+          description: Job slot utilization (%) that counts as "all slots busy".
+        - macro: '{$GITLAB_RUNNER.SLOTS.UTIL.PERIOD}'
+          value: 15m
+          description: How long all slots must be busy before a problem is raised.
+        - macro: '{$GITLAB_RUNNER.QUEUE.TIME.MAX}'
+          value: 5m
+          description: 'Average queue time (rolling 1h) above which a problem is raised. Supports context: {$GITLAB_RUNNER.QUEUE.TIME.MAX:"runner-name"}.'
+        - macro: '{$GITLAB_RUNNER.FAILED.SYSTEM.MAX}'
+          value: '0'
+          description: Jobs failed because of runner errors in the last hour above which a problem is raised. Supports context.
+        - macro: '{$GITLAB_RUNNER.API.ERRORS.MAX}'
+          value: '10'
+          description: GitLab API error responses in 15 minutes above which a problem is raised. Supports context.
+        - macro: '{$GITLAB_RUNNER.LOG.ERRORS.MAX}'
+          value: '0'
+          description: Errors logged by gitlab-runner in 15 minutes above which a problem is raised.
+        - macro: '{$GITLAB_RUNNER.LLD.FILTER.NAME.MATCHES}'
+          value: .*
+          description: Only discover runners whose name matches this regex.
+        - macro: '{$GITLAB_RUNNER.LLD.FILTER.NAME.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: Do not discover runners whose name matches this regex.
+      dashboards:
+        - uuid: 445da2e90354415aa1e659cc67026cf4
+          name: GitLab Runner
+          pages:
+            - name: Jobs
+              widgets:
+                - type: item
+                  name: Jobs running
+                  x: '0'
+                  y: '0'
+                  width: '12'
+                  height: '4'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Jobs running
+                    - type: INTEGER
+                      name: desc_bold
+                      value: '1'
+                    - type: INTEGER
+                      name: desc_size
+                      value: '10'
+                    - type: INTEGER
+                      name: desc_v_pos
+                      value: '0'
+                    - type: INTEGER
+                      name: decimal_size
+                      value: '30'
+                    - type: INTEGER
+                      name: units_size
+                      value: '30'
+                    - type: INTEGER
+                      name: value_size
+                      value: '30'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: GitLab Runner by HTTP
+                        key: gitlab_runner.jobs.running
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                    - type: INTEGER
+                      name: show.2
+                      value: '5'
+                    - type: STRING
+                      name: reference
+                      value: AAAAB
+                - type: gauge
+                  name: Job slot utilization
+                  x: '12'
+                  y: '0'
+                  width: '12'
+                  height: '4'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Job slot utilization
+                    - type: INTEGER
+                      name: desc_bold
+                      value: '1'
+                    - type: INTEGER
+                      name: desc_size
+                      value: '10'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: GitLab Runner by HTTP
+                        key: gitlab_runner.slots.utilization
+                    - type: STRING
+                      name: min
+                      value: '0'
+                    - type: STRING
+                      name: max
+                      value: '100'
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                    - type: INTEGER
+                      name: show.2
+                      value: '4'
+                    - type: INTEGER
+                      name: show.3
+                      value: '5'
+                    - type: STRING
+                      name: thresholds.0.color
+                      value: 4CAF50
+                    - type: STRING
+                      name: thresholds.0.threshold
+                      value: '0'
+                    - type: STRING
+                      name: thresholds.1.color
+                      value: FFA059
+                    - type: STRING
+                      name: thresholds.1.threshold
+                      value: '75'
+                    - type: STRING
+                      name: thresholds.2.color
+                      value: FF465C
+                    - type: STRING
+                      name: thresholds.2.threshold
+                      value: '100'
+                    - type: INTEGER
+                      name: th_show_arc
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: AAAAC
+                - type: item
+                  name: Jobs finished (24h)
+                  x: '24'
+                  y: '0'
+                  width: '12'
+                  height: '4'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Jobs finished (24h)
+                    - type: INTEGER
+                      name: desc_bold
+                      value: '1'
+                    - type: INTEGER
+                      name: desc_size
+                      value: '10'
+                    - type: INTEGER
+                      name: desc_v_pos
+                      value: '0'
+                    - type: INTEGER
+                      name: decimal_size
+                      value: '30'
+                    - type: INTEGER
+                      name: units_size
+                      value: '30'
+                    - type: INTEGER
+                      name: value_size
+                      value: '30'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: GitLab Runner by HTTP
+                        key: gitlab_runner.jobs.finished.24h
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                    - type: INTEGER
+                      name: show.2
+                      value: '5'
+                    - type: STRING
+                      name: reference
+                      value: AAAAD
+                - type: item
+                  name: Avg duration (24h)
+                  x: '36'
+                  y: '0'
+                  width: '12'
+                  height: '4'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Avg duration (24h)
+                    - type: INTEGER
+                      name: desc_bold
+                      value: '1'
+                    - type: INTEGER
+                      name: desc_size
+                      value: '10'
+                    - type: INTEGER
+                      name: desc_v_pos
+                      value: '0'
+                    - type: INTEGER
+                      name: decimal_size
+                      value: '30'
+                    - type: INTEGER
+                      name: units_size
+                      value: '30'
+                    - type: INTEGER
+                      name: value_size
+                      value: '30'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: GitLab Runner by HTTP
+                        key: gitlab_runner.jobs.duration.avg.24h
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                    - type: INTEGER
+                      name: show.2
+                      value: '5'
+                    - type: STRING
+                      name: reference
+                      value: AAAAE
+                - type: item
+                  name: Avg queue (24h)
+                  x: '48'
+                  y: '0'
+                  width: '12'
+                  height: '4'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Avg queue (24h)
+                    - type: INTEGER
+                      name: desc_bold
+                      value: '1'
+                    - type: INTEGER
+                      name: desc_size
+                      value: '10'
+                    - type: INTEGER
+                      name: desc_v_pos
+                      value: '0'
+                    - type: INTEGER
+                      name: decimal_size
+                      value: '30'
+                    - type: INTEGER
+                      name: units_size
+                      value: '30'
+                    - type: INTEGER
+                      name: value_size
+                      value: '30'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: GitLab Runner by HTTP
+                        key: gitlab_runner.jobs.queue.avg.24h
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                    - type: INTEGER
+                      name: show.2
+                      value: '5'
+                    - type: STRING
+                      name: reference
+                      value: AAAAF
+                - type: item
+                  name: Jobs failed (24h)
+                  x: '60'
+                  y: '0'
+                  width: '12'
+                  height: '4'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Jobs failed (24h)
+                    - type: INTEGER
+                      name: desc_bold
+                      value: '1'
+                    - type: INTEGER
+                      name: desc_size
+                      value: '10'
+                    - type: INTEGER
+                      name: desc_v_pos
+                      value: '0'
+                    - type: INTEGER
+                      name: decimal_size
+                      value: '30'
+                    - type: INTEGER
+                      name: units_size
+                      value: '30'
+                    - type: INTEGER
+                      name: value_size
+                      value: '30'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: GitLab Runner by HTTP
+                        key: gitlab_runner.jobs.failed.24h
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                    - type: INTEGER
+                      name: show.2
+                      value: '5'
+                    - type: STRING
+                      name: reference
+                      value: AAAAG
+                - type: honeycomb
+                  name: Runner health
+                  x: '0'
+                  y: '4'
+                  width: '24'
+                  height: '3'
+                  fields:
+                    - type: STRING
+                      name: items.0
+                      value: 'Runner [*]: Health'
+                    - type: STRING
+                      name: primary_label
+                      value: '{{ITEM.NAME}.regsub("\[(.*)\]", "\1")}'
+                    - type: STRING
+                      name: reference
+                      value: AAAAH
+                    - type: INTEGER
+                      name: secondary_label_decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: thresholds.0.color
+                      value: FF465C
+                    - type: STRING
+                      name: thresholds.0.threshold
+                      value: '0'
+                    - type: STRING
+                      name: thresholds.1.color
+                      value: 4CAF50
+                    - type: STRING
+                      name: thresholds.1.threshold
+                      value: '1'
+                    - type: STRING
+                      name: thresholds.2.color
+                      value: D2D2D2
+                    - type: STRING
+                      name: thresholds.2.threshold
+                      value: '2'
+                - type: honeycomb
+                  name: Jobs running per runner
+                  x: '24'
+                  y: '4'
+                  width: '48'
+                  height: '3'
+                  fields:
+                    - type: STRING
+                      name: items.0
+                      value: 'Runner [*]: Jobs running'
+                    - type: STRING
+                      name: primary_label
+                      value: '{{ITEM.NAME}.regsub("\[(.*)\]", "\1")}'
+                    - type: STRING
+                      name: reference
+                      value: AAAAI
+                    - type: INTEGER
+                      name: secondary_label_decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: thresholds.0.color
+                      value: D2D2D2
+                    - type: STRING
+                      name: thresholds.0.threshold
+                      value: '0'
+                    - type: STRING
+                      name: thresholds.1.color
+                      value: 29B6F6
+                    - type: STRING
+                      name: thresholds.1.threshold
+                      value: '1'
+                - type: svggraph
+                  name: Jobs finished per hour, by runner (24h)
+                  x: '0'
+                  y: '7'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Runner [*]: Jobs finished'
+                    - type: STRING
+                      name: ds.0.color
+                      value: 29B6F6
+                    - type: INTEGER
+                      name: ds.0.type
+                      value: '3'
+                    - type: INTEGER
+                      name: ds.0.stacked
+                      value: '1'
+                    - type: INTEGER
+                      name: ds.0.aggregate_function
+                      value: '5'
+                    - type: STRING
+                      name: ds.0.aggregate_interval
+                      value: 1h
+                    - type: INTEGER
+                      name: legend_lines
+                      value: '4'
+                    - type: INTEGER
+                      name: legend_lines_mode
+                      value: '1'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: STRING
+                      name: time_period.from
+                      value: now-24h
+                    - type: STRING
+                      name: time_period.to
+                      value: now
+                    - type: STRING
+                      name: reference
+                      value: AAAAJ
+                - type: svggraph
+                  name: Failed jobs per hour (24h)
+                  x: '36'
+                  y: '7'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Runner [*]: Jobs failed: job errors'
+                    - type: STRING
+                      name: ds.0.color
+                      value: FFA059
+                    - type: INTEGER
+                      name: ds.0.type
+                      value: '3'
+                    - type: INTEGER
+                      name: ds.0.stacked
+                      value: '1'
+                    - type: INTEGER
+                      name: ds.0.aggregate_function
+                      value: '5'
+                    - type: STRING
+                      name: ds.0.aggregate_interval
+                      value: 1h
+                    - type: STRING
+                      name: ds.0.data_set_label
+                      value: Job errors
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Runner [*]: Jobs failed: runner errors'
+                    - type: STRING
+                      name: ds.1.color
+                      value: FF465C
+                    - type: INTEGER
+                      name: ds.1.type
+                      value: '3'
+                    - type: INTEGER
+                      name: ds.1.stacked
+                      value: '1'
+                    - type: INTEGER
+                      name: ds.1.aggregate_function
+                      value: '5'
+                    - type: STRING
+                      name: ds.1.aggregate_interval
+                      value: 1h
+                    - type: STRING
+                      name: ds.1.data_set_label
+                      value: Runner errors
+                    - type: INTEGER
+                      name: legend_lines
+                      value: '4'
+                    - type: INTEGER
+                      name: legend_lines_mode
+                      value: '1'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: STRING
+                      name: time_period.from
+                      value: now-24h
+                    - type: STRING
+                      name: time_period.to
+                      value: now
+                    - type: STRING
+                      name: reference
+                      value: AAAAK
+                - type: svggraph
+                  name: Average job duration, by runner (rolling 1h)
+                  x: '0'
+                  y: '12'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Runner [*]: Average job duration, last hour'
+                    - type: STRING
+                      name: ds.0.color
+                      value: 4CAF50
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: INTEGER
+                      name: legend_lines
+                      value: '4'
+                    - type: INTEGER
+                      name: legend_lines_mode
+                      value: '1'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: STRING
+                      name: reference
+                      value: AAAAL
+                - type: svggraph
+                  name: Average queue time, by runner (rolling 1h)
+                  x: '36'
+                  y: '12'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Runner [*]: Average queue time, last hour'
+                    - type: STRING
+                      name: ds.0.color
+                      value: 7E57C2
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: INTEGER
+                      name: legend_lines
+                      value: '4'
+                    - type: INTEGER
+                      name: legend_lines_mode
+                      value: '1'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: STRING
+                      name: reference
+                      value: AAAAM
+                - type: svggraph
+                  name: Running jobs vs. concurrent limit
+                  x: '0'
+                  y: '17'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Runner [*]: Jobs running'
+                    - type: STRING
+                      name: ds.0.color
+                      value: 29B6F6
+                    - type: INTEGER
+                      name: ds.0.type
+                      value: '2'
+                    - type: INTEGER
+                      name: ds.0.stacked
+                      value: '1'
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '5'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: Concurrent job limit
+                    - type: STRING
+                      name: ds.1.color
+                      value: FF465C
+                    - type: INTEGER
+                      name: ds.1.type
+                      value: '2'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: INTEGER
+                      name: legend_lines
+                      value: '4'
+                    - type: INTEGER
+                      name: legend_lines_mode
+                      value: '1'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: STRING
+                      name: reference
+                      value: AAAAN
+                - type: problems
+                  name: Problems
+                  x: '36'
+                  y: '17'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: reference
+                      value: AAAAO
+            - name: Runner process
+              widgets:
+                - type: item
+                  name: Version
+                  x: '0'
+                  y: '0'
+                  width: '18'
+                  height: '3'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Version
+                    - type: INTEGER
+                      name: desc_bold
+                      value: '1'
+                    - type: INTEGER
+                      name: desc_size
+                      value: '10'
+                    - type: INTEGER
+                      name: desc_v_pos
+                      value: '0'
+                    - type: INTEGER
+                      name: decimal_size
+                      value: '30'
+                    - type: INTEGER
+                      name: units_size
+                      value: '30'
+                    - type: INTEGER
+                      name: value_size
+                      value: '30'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: GitLab Runner by HTTP
+                        key: gitlab_runner.version
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                    - type: STRING
+                      name: reference
+                      value: AAAAP
+                - type: item
+                  name: Uptime
+                  x: '18'
+                  y: '0'
+                  width: '18'
+                  height: '3'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Uptime
+                    - type: INTEGER
+                      name: desc_bold
+                      value: '1'
+                    - type: INTEGER
+                      name: desc_size
+                      value: '10'
+                    - type: INTEGER
+                      name: desc_v_pos
+                      value: '0'
+                    - type: INTEGER
+                      name: decimal_size
+                      value: '30'
+                    - type: INTEGER
+                      name: units_size
+                      value: '30'
+                    - type: INTEGER
+                      name: value_size
+                      value: '30'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: GitLab Runner by HTTP
+                        key: gitlab_runner.uptime
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                    - type: STRING
+                      name: reference
+                      value: AAAAQ
+                - type: item
+                  name: Concurrent job limit
+                  x: '36'
+                  y: '0'
+                  width: '18'
+                  height: '3'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Concurrent job limit
+                    - type: INTEGER
+                      name: desc_bold
+                      value: '1'
+                    - type: INTEGER
+                      name: desc_size
+                      value: '10'
+                    - type: INTEGER
+                      name: desc_v_pos
+                      value: '0'
+                    - type: INTEGER
+                      name: decimal_size
+                      value: '30'
+                    - type: INTEGER
+                      name: units_size
+                      value: '30'
+                    - type: INTEGER
+                      name: value_size
+                      value: '30'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: GitLab Runner by HTTP
+                        key: gitlab_runner.concurrent
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                    - type: STRING
+                      name: reference
+                      value: AAAAR
+                - type: item
+                  name: Errors logged (last poll)
+                  x: '54'
+                  y: '0'
+                  width: '18'
+                  height: '3'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Errors logged (last poll)
+                    - type: INTEGER
+                      name: desc_bold
+                      value: '1'
+                    - type: INTEGER
+                      name: desc_size
+                      value: '10'
+                    - type: INTEGER
+                      name: desc_v_pos
+                      value: '0'
+                    - type: INTEGER
+                      name: decimal_size
+                      value: '30'
+                    - type: INTEGER
+                      name: units_size
+                      value: '30'
+                    - type: INTEGER
+                      name: value_size
+                      value: '30'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: GitLab Runner by HTTP
+                        key: gitlab_runner.log.errors
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                    - type: INTEGER
+                      name: show.2
+                      value: '5'
+                    - type: STRING
+                      name: reference
+                      value: AAAAS
+                - type: svggraph
+                  name: Process CPU and memory
+                  x: '0'
+                  y: '3'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Process: CPU utilization'
+                    - type: STRING
+                      name: ds.0.color
+                      value: FFA059
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Process: Memory usage'
+                    - type: STRING
+                      name: ds.1.color
+                      value: 29B6F6
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: INTEGER
+                      name: ds.1.axisy
+                      value: '1'
+                    - type: INTEGER
+                      name: legend_lines
+                      value: '4'
+                    - type: INTEGER
+                      name: legend_lines_mode
+                      value: '1'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: STRING
+                      name: reference
+                      value: AAAAT
+                - type: svggraph
+                  name: Log errors and warnings per hour
+                  x: '36'
+                  y: '3'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Log: Errors'
+                    - type: STRING
+                      name: ds.0.color
+                      value: FF465C
+                    - type: INTEGER
+                      name: ds.0.type
+                      value: '3'
+                    - type: INTEGER
+                      name: ds.0.aggregate_function
+                      value: '5'
+                    - type: STRING
+                      name: ds.0.aggregate_interval
+                      value: 1h
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Log: Warnings'
+                    - type: STRING
+                      name: ds.1.color
+                      value: FFA059
+                    - type: INTEGER
+                      name: ds.1.type
+                      value: '3'
+                    - type: INTEGER
+                      name: ds.1.aggregate_function
+                      value: '5'
+                    - type: STRING
+                      name: ds.1.aggregate_interval
+                      value: 1h
+                    - type: INTEGER
+                      name: legend_lines
+                      value: '4'
+                    - type: INTEGER
+                      name: legend_lines_mode
+                      value: '1'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: STRING
+                      name: time_period.from
+                      value: now-24h
+                    - type: STRING
+                      name: time_period.to
+                      value: now
+                    - type: STRING
+                      name: reference
+                      value: AAAAU
+                - type: svggraph
+                  name: GitLab API errors per hour, by runner
+                  x: '0'
+                  y: '8'
+                  width: '72'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Runner [*]: GitLab API errors'
+                    - type: STRING
+                      name: ds.0.color
+                      value: FF465C
+                    - type: INTEGER
+                      name: ds.0.type
+                      value: '3'
+                    - type: INTEGER
+                      name: ds.0.stacked
+                      value: '1'
+                    - type: INTEGER
+                      name: ds.0.aggregate_function
+                      value: '5'
+                    - type: STRING
+                      name: ds.0.aggregate_interval
+                      value: 1h
+                    - type: INTEGER
+                      name: legend_lines
+                      value: '4'
+                    - type: INTEGER
+                      name: legend_lines_mode
+                      value: '1'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: STRING
+                      name: time_period.from
+                      value: now-24h
+                    - type: STRING
+                      name: time_period.to
+                      value: now
+                    - type: STRING
+                      name: reference
+                      value: AAAAV
+      valuemaps:
+        - uuid: 8bfb9b021a564d1f865c179633d03d7a
+          name: GitLab Runner health
+          mappings:
+            - value: '0'
+              newvalue: Unhealthy
+            - value: '1'
+              newvalue: Healthy
+            - value: '2'
+              newvalue: Not reported
+      tags:
+        - tag: class
+          value: software
+        - tag: target
+          value: gitlab-runner
+  graphs:
+    - uuid: eaec592e8355454a92983cb8ed091463
+      name: 'GitLab Runner: Jobs running vs. concurrent limit'
+      graph_items:
+        - drawtype: GRADIENT_LINE
+          color: 29B6F6
+          item:
+            host: GitLab Runner by HTTP
+            key: gitlab_runner.jobs.running
+        - sortorder: '1'
+          drawtype: BOLD_LINE
+          color: FF465C
+          item:
+            host: GitLab Runner by HTTP
+            key: gitlab_runner.concurrent
+    - uuid: e08b35bac827490186a7cf3bcbb21bd1
+      name: 'GitLab Runner: Process CPU and memory'
+      graph_items:
+        - color: FFA059
+          item:
+            host: GitLab Runner by HTTP
+            key: gitlab_runner.process.cpu.util
+        - sortorder: '1'
+          color: 29B6F6
+          yaxisside: RIGHT
+          item:
+            host: GitLab Runner by HTTP
+            key: gitlab_runner.process.memory.rss

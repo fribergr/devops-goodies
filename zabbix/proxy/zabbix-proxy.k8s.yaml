@@ -1,0 +1,61 @@
+# An active Zabbix proxy inside the cluster. It reaches the exporters through
+# their *.svc.cluster.local names, so nothing has to be exposed outside the
+# cluster. Add a proxy in the Zabbix frontend named exactly as ZBX_HOSTNAME.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zabbix
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zabbix-proxy
+  namespace: zabbix
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: zabbix-proxy
+  template:
+    metadata:
+      labels:
+        app: zabbix-proxy
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: proxy
+          image: zabbix/zabbix-proxy-sqlite3:alpine-7.4.15
+          env:
+            - { name: ZBX_PROXYMODE, value: "0" }            # active: the proxy connects to the server
+            - { name: ZBX_HOSTNAME, value: my-cluster }
+            - { name: ZBX_SERVER_HOST, value: zabbix.local }
+            - { name: ZBX_PROXYBUFFERMODE, value: memory }
+            - { name: ZBX_PROXYMEMORYBUFFERSIZE, value: 16M }
+            - { name: ZBX_CACHESIZE, value: 8M }
+            - { name: ZBX_HISTORYCACHESIZE, value: 8M }
+            - { name: ZBX_HISTORYINDEXCACHESIZE, value: 2M }
+            # Only HTTP agent items are used, so everything else is kept to a minimum.
+            - { name: ZBX_STARTPOLLERS, value: "1" }
+            - { name: ZBX_STARTPOLLERSUNREACHABLE, value: "1" }
+            - { name: ZBX_STARTHTTPAGENTPOLLERS, value: "1" }
+            - { name: ZBX_STARTTRAPPERS, value: "1" }
+            - { name: ZBX_STARTPREPROCESSORS, value: "1" }
+            - { name: ZBX_STARTDBSYNCERS, value: "1" }
+            - { name: ZBX_STARTODBCPOLLERS, value: "0" }
+            - { name: ZBX_STARTAGENTPOLLERS, value: "0" }
+            - { name: ZBX_STARTHTTPPOLLERS, value: "0" }
+            - { name: ZBX_STARTSNMPPOLLERS, value: "0" }
+            - { name: ZBX_STARTBROWSERPOLLERS, value: "0" }
+            - { name: ZBX_STARTPINGERS, value: "0" }
+            - { name: ZBX_STARTDISCOVERERS, value: "0" }
+          resources:
+            requests: { cpu: 10m, memory: 48Mi }
+            limits: { memory: 160Mi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/zabbix/db_data }
+      volumes:
+        - name: data
+          emptyDir: {}

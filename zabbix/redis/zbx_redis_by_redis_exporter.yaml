@@ -1,0 +1,1134 @@
+zabbix_export:
+  version: '7.4'
+  template_groups:
+    - uuid: 94ae43481cdd4051a3c606e48245f52a
+      name: Templates/Databases
+  templates:
+    - uuid: b864cced44b14d4092fbbc2e09727bc7
+      template: Redis by redis_exporter
+      name: Redis by redis_exporter
+      description: |-
+        Scrapes one Redis through a shared redis_exporter in multi-target mode (/scrape?target=...), from the cluster's Zabbix proxy. No Zabbix agent needed.
+
+        Link it to the installation's host and set {$REDIS.TARGET} to redis://redis.<namespace>.svc.cluster.local:6379, the same string as the key in the exporter's password file.
+        Redis without maxmemory: set {$REDIS.MEM.LIMIT} to the pod's memory limit, or the memory triggers stay quiet.
+      vendor:
+        name: HIT
+        version: 7.4-1
+      groups:
+        - name: Templates/Databases
+      items:
+        - uuid: 3a26b8505e214f45986de752db08c3e5
+          name: 'Redis: exporter raw'
+          type: HTTP_AGENT
+          key: redis.exporter.raw
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          description: Raw Prometheus text from redis_exporter's /scrape for {$REDIS.TARGET}. Every other item is a dependent item of this one.
+          url: '{$REDIS.EXPORTER.URL}/scrape'
+          timeout: '{$REDIS.EXPORTER.TIMEOUT}'
+          query_fields:
+            - name: target
+              value: '{$REDIS.TARGET}'
+          headers:
+            - name: User-Agent
+              value: Zabbix
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 5f654b34b6ae45d3bc8eeae2e36b2729
+          name: 'Redis: Up'
+          type: DEPENDENT
+          key: redis.up
+          delay: '0'
+          description: 1 when the exporter could connect to and authenticate with Redis on this scrape, otherwise 0.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_up
+                - value
+                - ''
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: availability
+          triggers:
+            - uuid: 313bbb9411ef4504b928111af81d1cca
+              expression: last(/Redis by redis_exporter/redis.up)=0
+              name: 'Redis: the exporter cannot reach Redis'
+              priority: HIGH
+              description: 'The installation has lost its queue, sessions and cache: nobody can log in and no jobs run. If the pod is up, check the target in {$REDIS.TARGET} and that the exporter''s password file has an entry for exactly that URI with the current requirepass.'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: ac9c8e4a58e34eacafee5444b934c994
+              expression: nodata(/Redis by redis_exporter/redis.up,{$REDIS.NODATA})=1
+              name: 'Redis: no data from redis_exporter for {$REDIS.NODATA}'
+              priority: AVERAGE
+              description: The proxy cannot fetch /scrape from the exporter in {$REDIS.EXPORTER.URL}. The exporter serves every Redis in the cluster, so every installation alerts at once when the exporter itself is down.
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: ec962d37e4844898b79da7fba0cc4bf1
+          name: 'Redis: Uptime'
+          type: DEPENDENT
+          key: redis.uptime
+          delay: '0'
+          units: uptime
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_uptime_in_seconds
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: availability
+          triggers:
+            - uuid: 2691ea901fad4b27845bed60b851520c
+              expression: last(/Redis by redis_exporter/redis.uptime)<{$REDIS.RESTART.WINDOW}
+              name: 'Redis: restarted (uptime {ITEM.LASTVALUE1})'
+              priority: WARNING
+              description: 'Redis has been running for less than {$REDIS.RESTART.WINDOW} seconds. After a crash or OOMKill it reloads the last RDB snapshot, so queued jobs and sessions written since that save are gone: users may have to log in again and mail or notifications from those jobs never go out. Check the pod''s restart count and last state. Resolves by itself.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 26e153ab57634cf09dc9eb58ae46eece
+          name: 'Redis: Version'
+          type: DEPENDENT
+          key: redis.version
+          delay: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_instance_info
+                - label
+                - redis_version
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: build
+        - uuid: 74b17394d8554c029186e311672f66fd
+          name: 'Redis: Memory used'
+          type: DEPENDENT
+          key: redis.memory.used
+          delay: '0'
+          value_type: FLOAT
+          units: B
+          description: What Redis has allocated for its data (used_memory). maxmemory is enforced against this.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_memory_used_bytes
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: memory
+        - uuid: aba88a4df73747548e91659dc3c250f5
+          name: 'Redis: Memory used (RSS)'
+          type: DEPENDENT
+          key: redis.memory.rss
+          delay: '0'
+          value_type: FLOAT
+          units: B
+          description: What the process holds in RAM, as the kernel and the pod limit see it.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_memory_used_rss_bytes
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: memory
+        - uuid: 8cf93a0d41654f5f93d080f77cb7f86d
+          name: 'Redis: maxmemory'
+          type: DEPENDENT
+          key: redis.memory.max
+          delay: '0'
+          units: B
+          description: 0 means no limit, so Redis grows until the pod is OOMKilled.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_memory_max_bytes
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: memory
+        - uuid: b79833c6230347ecb999991df09012f2
+          name: 'Redis: maxmemory-policy'
+          type: DEPENDENT
+          key: redis.maxmemory_policy
+          delay: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_instance_info
+                - label
+                - maxmemory_policy
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: memory
+          triggers:
+            - uuid: 3ec4051b9a7e4f808b15ace48a0b0250
+              expression: last(/Redis by redis_exporter/redis.memory.max)>0 and find(/Redis by redis_exporter/redis.maxmemory_policy,,"regexp","^noeviction$")=0
+              name: 'Redis: maxmemory-policy is {ITEM.LASTVALUE2}, not noeviction'
+              priority: WARNING
+              description: With a maxmemory set, any other policy lets Redis delete keys when memory runs out, and db0 holds the job queue and the sessions. Set maxmemory-policy noeviction.
+              tags:
+                - tag: scope
+                  value: memory
+        - uuid: 1d37718918624c339f1c8a4df4d70f27
+          name: 'Redis: Memory limit'
+          type: CALCULATED
+          key: redis.memory.limit
+          value_type: FLOAT
+          params: last(//redis.memory.max)+(last(//redis.memory.max)=0)*{$REDIS.MEM.LIMIT}
+          units: B
+          description: maxmemory when it is set, otherwise {$REDIS.MEM.LIMIT} (set it to the pod's memory limit). 0 when neither is set, and then the memory triggers stay quiet.
+          tags:
+            - tag: component
+              value: memory
+        - uuid: 3c83eda464ad46f88ad2493efbed8be1
+          name: 'Redis: Memory usage'
+          type: CALCULATED
+          key: redis.memory.util
+          value_type: FLOAT
+          params: 100*last(//redis.memory.rss)/max(last(//redis.memory.limit),1)
+          units: '%'
+          description: RSS as a share of the memory limit. Meaningless while the limit is 0.
+          tags:
+            - tag: component
+              value: memory
+          triggers:
+            - uuid: afbd54ca6b004f1699465aebcdf350cf
+              expression: last(/Redis by redis_exporter/redis.memory.limit)>0 and min(/Redis by redis_exporter/redis.memory.util,5m)>{$REDIS.MEM.UTIL.HIGH}
+              name: 'Redis: memory over {$REDIS.MEM.UTIL.HIGH}% of the limit'
+              priority: HIGH
+              description: Against maxmemory, Redis is about to refuse writes ("OOM command not allowed"). Against the pod limit ({$REDIS.MEM.LIMIT}), the pod is about to be OOMKilled, and a BGSAVE fork can need extra memory on top. Find what is growing in the keys per database, then raise the limit.
+              tags:
+                - tag: scope
+                  value: memory
+            - uuid: 72cf9277bdbd4a09b569ef60e4c2af67
+              expression: last(/Redis by redis_exporter/redis.memory.limit)>0 and min(/Redis by redis_exporter/redis.memory.util,5m)>{$REDIS.MEM.UTIL.WARN}
+              name: 'Redis: memory over {$REDIS.MEM.UTIL.WARN}% of the limit'
+              priority: WARNING
+              description: Memory is approaching the limit. See the High trigger for what happens at the limit.
+              dependencies:
+                - name: 'Redis: memory over {$REDIS.MEM.UTIL.HIGH}% of the limit'
+                  expression: last(/Redis by redis_exporter/redis.memory.limit)>0 and min(/Redis by redis_exporter/redis.memory.util,5m)>{$REDIS.MEM.UTIL.HIGH}
+              tags:
+                - tag: scope
+                  value: memory
+        - uuid: fb56e30741db4333874e26a57296b18b
+          name: 'Redis: Memory fragmentation ratio'
+          type: DEPENDENT
+          key: redis.memory.fragmentation
+          delay: '0'
+          value_type: FLOAT
+          description: RSS divided by used memory. High on a small, nearly empty instance; only worth acting on when RSS is large.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_mem_fragmentation_ratio
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: memory
+        - uuid: b51daef22da34aa58bd8f7e572e18f28
+          name: 'Redis: Commands refused for lack of memory'
+          type: DEPENDENT
+          key: redis.errors.oom
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          description: Writes Redis refused because maxmemory was reached. The counter only appears after the first such error, so 0 until then.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_errors_total{err="OOM"}
+                - value
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: memory
+          triggers:
+            - uuid: d948e94b22fd4be9beda8290500bf443
+              expression: max(/Redis by redis_exporter/redis.errors.oom,5m)>0
+              name: 'Redis: refusing writes, maxmemory reached'
+              priority: HIGH
+              description: Queue pushes, session writes and cache writes are failing. Raise maxmemory (and the pod limit with it), or find the keys that are growing.
+              tags:
+                - tag: scope
+                  value: memory
+        - uuid: 75276b39f3bc4c75bbf07a65ba666075
+          name: 'Redis: Evicted keys'
+          type: DEPENDENT
+          key: redis.evicted_keys
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          description: Keys Redis deleted to free memory. Stays 0 under noeviction.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_evicted_keys_total
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: memory
+          triggers:
+            - uuid: c609d290f0dc4f789435dd33de1e8493
+              expression: max(/Redis by redis_exporter/redis.evicted_keys,5m)>0
+              name: 'Redis: evicting keys'
+              priority: HIGH
+              description: Redis is deleting keys to stay under maxmemory. db0 holds the job queue and the sessions, so jobs can vanish without a trace and users get logged out. Set maxmemory-policy noeviction and give Redis more memory.
+              tags:
+                - tag: scope
+                  value: memory
+        - uuid: ead6c8a0172f4eecb436704d21002f3c
+          name: 'Redis: Expired keys'
+          type: DEPENDENT
+          key: redis.expired_keys
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_expired_keys_total
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: keys
+        - uuid: 33318005370f4c3fa086b5e11a59100f
+          name: 'Redis: Connected clients'
+          type: DEPENDENT
+          key: redis.clients.connected
+          delay: '0'
+          value_type: UNSIGNED
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_connected_clients
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: clients
+        - uuid: 2a0ad492f40d42c1ac166cffbc7e4e0c
+          name: 'Redis: Blocked clients'
+          type: DEPENDENT
+          key: redis.clients.blocked
+          delay: '0'
+          value_type: UNSIGNED
+          description: Clients waiting in a blocking command. Queue workers waiting for a job show up here.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_blocked_clients
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: clients
+        - uuid: 164395b420854a43ad1b188b85467bea
+          name: 'Redis: maxclients'
+          type: DEPENDENT
+          key: redis.clients.max
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_config_maxclients
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: clients
+        - uuid: 922b282068ea433d99cad3a0594216fe
+          name: 'Redis: Client usage'
+          type: CALCULATED
+          key: redis.clients.util
+          value_type: FLOAT
+          params: 100*last(//redis.clients.connected)/last(//redis.clients.max)
+          units: '%'
+          tags:
+            - tag: component
+              value: clients
+          triggers:
+            - uuid: 077ac1f0ef1042cdb7b5fea004bccc46
+              expression: min(/Redis by redis_exporter/redis.clients.util,5m)>{$REDIS.CLIENTS.UTIL.WARN}
+              name: 'Redis: more than {$REDIS.CLIENTS.UTIL.WARN}% of maxclients connected for 5m'
+              priority: WARNING
+              description: Something is leaking connections. At maxclients Redis rejects new ones.
+              tags:
+                - tag: scope
+                  value: clients
+        - uuid: 629c93df1650418ab5e45c27e78c3f3d
+          name: 'Redis: Rejected connections'
+          type: DEPENDENT
+          key: redis.clients.rejected
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_rejected_connections_total
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: clients
+          triggers:
+            - uuid: 8b4077e5fb414d689b14122d3802d9e0
+              expression: max(/Redis by redis_exporter/redis.clients.rejected,5m)>0
+              name: 'Redis: rejecting connections'
+              priority: HIGH
+              description: maxclients is reached, so web requests and workers cannot connect.
+              tags:
+                - tag: scope
+                  value: clients
+        - uuid: 251354cce760425a86cf529cfb7e5e2d
+          name: 'Redis: Commands'
+          type: DEPENDENT
+          key: redis.commands
+          delay: '0'
+          value_type: FLOAT
+          units: ops
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_commands_processed_total
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: traffic
+        - uuid: 9f7ef69e246045189e6f1ad896ecbb26
+          name: 'Redis: Network in'
+          type: DEPENDENT
+          key: redis.net.in
+          delay: '0'
+          value_type: FLOAT
+          units: Bps
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_net_input_bytes_total
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: traffic
+        - uuid: 0dd1827836f144cc9074c1cc5a4f1c44
+          name: 'Redis: Network out'
+          type: DEPENDENT
+          key: redis.net.out
+          delay: '0'
+          value_type: FLOAT
+          units: Bps
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_net_output_bytes_total
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: traffic
+        - uuid: 18edd670664048d8bfe9d743aad2bd21
+          name: 'Redis: Keyspace hits'
+          type: DEPENDENT
+          key: redis.keyspace.hits
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_keyspace_hits_total
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: keys
+        - uuid: c8fe2494840e4c6ba2eefb582933c4ef
+          name: 'Redis: Keyspace misses'
+          type: DEPENDENT
+          key: redis.keyspace.misses
+          delay: '0'
+          value_type: FLOAT
+          units: /s
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_keyspace_misses_total
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: keys
+        - uuid: 62b8eedd8b6f478faefab9c4c001cc5e
+          name: 'Redis: Keyspace hit ratio'
+          type: CALCULATED
+          key: redis.keyspace.hit_ratio
+          value_type: FLOAT
+          params: 100*last(//redis.keyspace.hits)/max(last(//redis.keyspace.hits)+last(//redis.keyspace.misses),0.001)
+          units: '%'
+          description: Reads that found their key. Mostly the cache in db1; a polling queue worker counts misses too, so a low value is not an alarm on its own.
+          tags:
+            - tag: component
+              value: keys
+        - uuid: aef6decc883d4056b6a21727945d5bdc
+          name: 'Redis: Slowlog length'
+          type: DEPENDENT
+          key: redis.slowlog.length
+          delay: '0'
+          value_type: UNSIGNED
+          description: Entries in the slow log (commands slower than slowlog-log-slower-than).
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_slowlog_length
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: performance
+        - uuid: 28a5e8a3c06844fdb94d923664594ea5
+          name: 'Redis: Last RDB save status'
+          type: DEPENDENT
+          key: redis.rdb.last_bgsave_status
+          delay: '0'
+          description: 1 when the last background save succeeded.
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_rdb_last_bgsave_status
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: persistence
+          triggers:
+            - uuid: 25c645a4701a42dd8a99e63720438316
+              expression: last(/Redis by redis_exporter/redis.rdb.last_bgsave_status)=0
+              name: 'Redis: last background save failed'
+              priority: HIGH
+              description: 'With stop-writes-on-bgsave-error yes, Redis now refuses every write: the queue has stopped and logins fail. Usual causes: the volume behind dir is full or read-only, or the fork failed for lack of memory. Read the Redis log, fix the cause, then run BGSAVE; writes resume once a save succeeds.'
+              tags:
+                - tag: scope
+                  value: persistence
+        - uuid: 073f2927527c435b86fbf41f5376c124
+          name: 'Redis: Last RDB save'
+          type: DEPENDENT
+          key: redis.rdb.last_save
+          delay: '0'
+          units: unixtime
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_rdb_last_save_timestamp_seconds
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: persistence
+        - uuid: b5e0fe8f2d9c4fa49187a37c2c4fdc87
+          name: 'Redis: Time since last save'
+          type: CALCULATED
+          key: redis.rdb.since_save
+          value_type: FLOAT
+          params: now()-last(//redis.rdb.last_save)
+          units: s
+          description: How much data a crash would lose, at most.
+          tags:
+            - tag: component
+              value: persistence
+        - uuid: 3a737c6ff1f24728a1213d907e489408
+          name: 'Redis: Changes since last save'
+          type: DEPENDENT
+          key: redis.rdb.changes
+          delay: '0'
+          value_type: UNSIGNED
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_rdb_changes_since_last_save
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: persistence
+          triggers:
+            - uuid: b7257250cca34cf28ba99840bc247b5a
+              expression: last(/Redis by redis_exporter/redis.rdb.changes)>0 and last(/Redis by redis_exporter/redis.rdb.since_save)>{$REDIS.RDB.MAX_AGE}
+              name: 'Redis: unsaved changes for more than {$REDIS.RDB.MAX_AGE}s'
+              priority: WARNING
+              description: The save rules (save 900 1 and so on) should have written a snapshot by now. A save is stuck or saving is switched off (CONFIG GET save), so a crash would lose everything since {ITEM.LASTVALUE2} seconds ago.
+              dependencies:
+                - name: 'Redis: last background save failed'
+                  expression: last(/Redis by redis_exporter/redis.rdb.last_bgsave_status)=0
+              tags:
+                - tag: scope
+                  value: persistence
+        - uuid: 0d2bdbb432ea4a1e8d283b087127c853
+          name: 'Redis: AOF enabled'
+          type: DEPENDENT
+          key: redis.aof.enabled
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - redis_aof_enabled
+                - value
+                - ''
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: redis.exporter.raw
+          tags:
+            - tag: component
+              value: persistence
+      discovery_rules:
+        - uuid: 7e27cfe29e1a4e68b73af01ea29b96f4
+          name: Database discovery
+          type: DEPENDENT
+          key: redis.db.discovery
+          delay: '0'
+          description: One set of items per Redis database that holds keys. In HIT, db0 holds the job queue and the sessions, db1 the cache. A database missing for a day gets its items disabled, for 7 days deleted, so a Redis restart leaves them alone.
+          lifetime_type: DELETE_AFTER
+          lifetime: 7d
+          enabled_lifetime_type: DISABLE_AFTER
+          enabled_lifetime: 1d
+          master_item:
+            key: redis.exporter.raw
+          lld_macro_paths:
+            - lld_macro: '{#DB}'
+              path: $.db
+          preprocessing:
+            - type: PROMETHEUS_TO_JSON
+              parameters:
+                - redis_db_keys
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |-
+                  return JSON.stringify(JSON.parse(value)
+                      .filter(function (m) { return parseFloat(m.value) > 0; })
+                      .map(function (m) { return {db: m.labels.db}; }));
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          item_prototypes:
+            - uuid: 18f61af6df0f490bb062babb278cb087
+              name: 'Redis {#DB}: keys'
+              type: DEPENDENT
+              key: redis.db.keys[{#DB}]
+              delay: '0'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - redis_db_keys{db="{#DB}"}
+                    - value
+                    - ''
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: redis.exporter.raw
+              tags:
+                - tag: component
+                  value: keys
+                - tag: database
+                  value: '{#DB}'
+            - uuid: 4ef8927dd2a742b9a82368c9f0f56bc2
+              name: 'Redis {#DB}: keys with a TTL'
+              type: DEPENDENT
+              key: redis.db.keys_expiring[{#DB}]
+              delay: '0'
+              description: Keys that will expire by themselves. Keys without a TTL stay until something deletes them.
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - redis_db_keys_expiring{db="{#DB}"}
+                    - value
+                    - ''
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: redis.exporter.raw
+              tags:
+                - tag: component
+                  value: keys
+                - tag: database
+                  value: '{#DB}'
+          graph_prototypes:
+            - uuid: 26baff9ebcb644869095550fc59dc9a1
+              name: 'Redis {#DB}: keys'
+              graph_items:
+                - sortorder: '0'
+                  color: 2774A4
+                  item:
+                    host: Redis by redis_exporter
+                    key: redis.db.keys[{#DB}]
+                - sortorder: '1'
+                  color: 1A7C11
+                  item:
+                    host: Redis by redis_exporter
+                    key: redis.db.keys_expiring[{#DB}]
+      tags:
+        - tag: class
+          value: database
+        - tag: target
+          value: redis
+      macros:
+        - macro: '{$REDIS.CLIENTS.UTIL.WARN}'
+          value: '80'
+          description: Connected clients, in percent of maxclients, held for 5 minutes before the Warning trigger fires.
+        - macro: '{$REDIS.EXPORTER.TIMEOUT}'
+          value: 10s
+          description: Timeout for the scrape.
+        - macro: '{$REDIS.EXPORTER.URL}'
+          value: http://redis-exporter.zabbix.svc.cluster.local:9121
+          description: Base URL of the cluster's redis_exporter as the Zabbix proxy reaches it.
+        - macro: '{$REDIS.MEM.LIMIT}'
+          value: '0'
+          description: The Redis pod's memory limit in bytes, used when Redis has no maxmemory. 0 switches the memory triggers off for such an instance.
+        - macro: '{$REDIS.MEM.UTIL.HIGH}'
+          value: '90'
+          description: Memory usage, in percent of the limit, held for 5 minutes before the High trigger fires.
+        - macro: '{$REDIS.MEM.UTIL.WARN}'
+          value: '75'
+          description: Memory usage, in percent of the limit, held for 5 minutes before the Warning trigger fires.
+        - macro: '{$REDIS.NODATA}'
+          value: 5m
+          description: How long without an answer from the exporter before the no-data trigger fires.
+        - macro: '{$REDIS.RDB.MAX_AGE}'
+          value: '3600'
+          description: Seconds with unsaved changes before the Warning trigger fires. The slowest save rule (save 900 1) writes within 15 minutes of a change.
+        - macro: '{$REDIS.RESTART.WINDOW}'
+          value: '600'
+          description: Seconds after a start during which the restart trigger stays on.
+        - macro: '{$REDIS.TARGET}'
+          value: redis://redis.CHANGE_ME.svc.cluster.local:6379
+          description: The Redis to scrape, exactly as the key in the exporter's password file.
+      dashboards:
+        - uuid: a0a318d371474439a31b23bfe9b60c74
+          name: Redis
+          auto_start: 'NO'
+          pages:
+            - name: Overview
+              widgets:
+                - type: item
+                  name: Uptime
+                  x: '0'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: Redis by redis_exporter
+                        key: redis.uptime
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: INTEGER
+                      name: value_size
+                      value: '20'
+                - type: item
+                  name: Memory used (RSS)
+                  x: '12'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: Redis by redis_exporter
+                        key: redis.memory.rss
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '1'
+                - type: item
+                  name: Memory usage
+                  x: '24'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: Redis by redis_exporter
+                        key: redis.memory.util
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: thresholds.0.color
+                      value: FF465C
+                    - type: STRING
+                      name: thresholds.0.threshold
+                      value: '75'
+                - type: item
+                  name: Clients
+                  x: '36'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: Redis by redis_exporter
+                        key: redis.clients.connected
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                - type: item
+                  name: Commands
+                  x: '48'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: Redis by redis_exporter
+                        key: redis.commands
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '1'
+                - type: item
+                  name: Since last save
+                  x: '60'
+                  y: '0'
+                  width: '12'
+                  height: '3'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: Redis by redis_exporter
+                        key: redis.rdb.since_save
+                    - type: INTEGER
+                      name: show.0
+                      value: '2'
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: INTEGER
+                      name: value_size
+                      value: '20'
+                    - type: STRING
+                      name: thresholds.0.color
+                      value: FF465C
+                    - type: STRING
+                      name: thresholds.0.threshold
+                      value: '3600'
+                - type: graph
+                  name: Memory
+                  x: '0'
+                  y: '3'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: Redis by redis_exporter
+                        name: 'Redis: Memory'
+                - type: graph
+                  name: Commands
+                  x: '36'
+                  y: '3'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: Redis by redis_exporter
+                        name: 'Redis: Commands'
+                - type: graph
+                  name: Clients
+                  x: '0'
+                  y: '8'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: Redis by redis_exporter
+                        name: 'Redis: Clients'
+                - type: topitems
+                  name: Keys per database
+                  x: '36'
+                  y: '8'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: INTEGER
+                      name: layout
+                      value: '1'
+                    - type: INTEGER
+                      name: show_column_header
+                      value: '0'
+                    - type: INTEGER
+                      name: problems
+                      value: '2'
+                    - type: STRING
+                      name: columns.0.items.0
+                      value: 'Redis *: keys'
+                    - type: INTEGER
+                      name: columns.0.display
+                      value: '2'
+                    - type: STRING
+                      name: columns.0.min
+                      value: '0'
+                    - type: INTEGER
+                      name: columns.0.decimal_places
+                      value: '0'
+                    - type: INTEGER
+                      name: item_ordering_order
+                      value: '2'
+                    - type: INTEGER
+                      name: item_ordering_limit
+                      value: '16'
+                - type: graph
+                  name: Network
+                  x: '0'
+                  y: '13'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: Redis by redis_exporter
+                        name: 'Redis: Network'
+                - type: graph
+                  name: Keyspace
+                  x: '36'
+                  y: '13'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: Redis by redis_exporter
+                        name: 'Redis: Keyspace'
+  graphs:
+    - uuid: d5a66866d0384c90a8ba4480d33154d5
+      name: 'Redis: Memory'
+      graph_items:
+        - sortorder: '0'
+          color: E53935
+          drawtype: DASHED_LINE
+          item:
+            host: Redis by redis_exporter
+            key: redis.memory.limit
+        - sortorder: '1'
+          color: F4B400
+          item:
+            host: Redis by redis_exporter
+            key: redis.memory.rss
+        - sortorder: '2'
+          color: 2774A4
+          item:
+            host: Redis by redis_exporter
+            key: redis.memory.used
+    - uuid: 20022884a7bc4cbb8cbbb54824278bb6
+      name: 'Redis: Commands'
+      graph_items:
+        - sortorder: '0'
+          color: 2774A4
+          item:
+            host: Redis by redis_exporter
+            key: redis.commands
+    - uuid: 7927d0103bf84861a3256ac78883de81
+      name: 'Redis: Clients'
+      graph_items:
+        - sortorder: '0'
+          color: 2774A4
+          item:
+            host: Redis by redis_exporter
+            key: redis.clients.connected
+        - sortorder: '1'
+          color: 1A7C11
+          item:
+            host: Redis by redis_exporter
+            key: redis.clients.blocked
+    - uuid: 608fc1af0de849bdbdd0f62df5750405
+      name: 'Redis: Network'
+      graph_items:
+        - sortorder: '0'
+          color: 2774A4
+          item:
+            host: Redis by redis_exporter
+            key: redis.net.in
+        - sortorder: '1'
+          color: 1A7C11
+          item:
+            host: Redis by redis_exporter
+            key: redis.net.out
+    - uuid: 9693100465ad4fa39b44303a53b6e717
+      name: 'Redis: Keyspace'
+      graph_items:
+        - sortorder: '0'
+          color: 1A7C11
+          item:
+            host: Redis by redis_exporter
+            key: redis.keyspace.hits
+        - sortorder: '1'
+          color: E53935
+          item:
+            host: Redis by redis_exporter
+            key: redis.keyspace.misses
+        - sortorder: '2'
+          color: F4B400
+          item:
+            host: Redis by redis_exporter
+            key: redis.expired_keys

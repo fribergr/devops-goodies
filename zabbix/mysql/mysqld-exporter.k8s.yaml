@@ -1,0 +1,56 @@
+# mysqld_exporter runs as a sidecar next to MySQL. Add the container and the
+# volume below to your MySQL Deployment, and the metrics port to its Service.
+#
+#      containers:
+#        - name: mysqld-exporter
+#          image: prom/mysqld-exporter:v0.20.0
+#          args:
+#            - --config.my-cnf=/etc/mysqld-exporter/.my.cnf
+#            - --collect.info_schema.tables    # database sizes in Zabbix
+#          ports:
+#            - { name: metrics, containerPort: 9104 }
+#          resources:
+#            requests: { cpu: 10m, memory: 32Mi }
+#            limits: { memory: 64Mi }
+#          volumeMounts:
+#            - { name: mysql-exporter-cnf, mountPath: /etc/mysqld-exporter, readOnly: true }
+#      volumes:
+#        - name: mysql-exporter-cnf
+#          secret:
+#            secretName: mysql-exporter-cnf
+#
+# The exporter logs in with its own MySQL user:
+#
+#   CREATE USER 'exporter'@'127.0.0.1' IDENTIFIED BY '…' WITH MAX_USER_CONNECTIONS 3;
+#   GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'exporter'@'127.0.0.1';
+#
+# and reads the credentials from a .my.cnf. Create it as a plain Secret and seal it:
+#
+#   cat > .my.cnf <<'CNF'
+#   [client]
+#   user=exporter
+#   password=…
+#   host=127.0.0.1
+#   CNF
+#   kubectl -n mysql create secret generic mysql-exporter-cnf \
+#     --from-file=.my.cnf --dry-run=client -o yaml \
+#     | kubeseal -o yaml > mysql-exporter-cnf.sealed.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: mysql
+  name: mysql
+  namespace: mysql
+spec:
+  ports:
+    - name: mysql
+      port: 3306
+      protocol: TCP
+      targetPort: 3306
+    - name: metrics
+      port: 9104
+      protocol: TCP
+      targetPort: 9104
+  selector:
+    app: mysql
