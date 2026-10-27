@@ -17,6 +17,16 @@ spec:
     spec:
       imagePullSecrets:
         - name: registry-pull-secret
+      # Migrations run here and not in the app container, where the probes
+      # could kill a long migration halfway through.
+      initContainers:
+      - name: migrate
+        image: registry.local/demo-app:deploy-prod-c5b872a
+        imagePullPolicy: Always
+        command: ["/migrate"]
+        env:
+          - name: APP_URL
+            value: 'https://demo-app.local'
       containers:
       - name: demo-app
         image: registry.local/demo-app:deploy-prod-c5b872a
@@ -30,10 +40,10 @@ spec:
         resources:
           requests:
             cpu: 50m
-            memory: 128Mi
+            memory: 256Mi
           limits:
             cpu: 400m
-            memory: 196Mi
+            memory: 512Mi
         livenessProbe:
           failureThreshold: 3
           initialDelaySeconds: 5
